@@ -1,29 +1,27 @@
 /**
  * POST /api/reception/scan
  *
- * 受付スキャンのメイン処理:
+ * 受付スキャンの「高速パス」:
  *  1. multipart/form-data で { ceremony_id, image } を受け取る
  *  2. 受付番号(= koden_number)を即時採番して attendees にINSERT
- *     （OCRが失敗しても番号は必ず返す＝受付を止めない）
  *  3. 画像を Supabase Storage にアップロード
- *  4. Vision + Gemini で OCR → 構造化データ取得
- *  5. attendees を OCR結果で更新
- *  6. { attendee_id, koden_number, ocr_status, extracted } を返す
+ *  4. { attendee_id, koden_number, image_path } を即返却
+ *
+ *  ★ OCRはここでは行わない（時間がかかるため）。
+ *    クライアント側がこのレスポンス受領後、別途 /api/reception/process-ocr
+ *    を fire-and-forget で叩いて非同期にOCRを走らせる。
  *
  * 設計意図:
- *  番号採番は必ず成功、OCRは失敗許容。これにより電波や API 障害があっても
- *  受付オペレーションが止まらず、後からレビュー画面で修正可能。
+ *  受付の現場で「番号がすぐ出る → スタッフが紙と袋に番号を書ける」が最重要。
+ *  OCR は失敗してもレビュー画面で後から修正可能なため、UI を待たせない。
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { processOcr } from '@/lib/ocr';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-// OCR (Vision + Gemini multimodal) には数秒かかることがあるため上限を引き上げる
-// Vercel Hobbyプランは最大60秒。Pro以上は300秒まで延長可能。
-export const maxDuration = 60;
+export const maxDuration = 30;
 
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -59,9 +57,9 @@ async function assignNextNumber(
         full_name: '(受付中)',
         koden_number: next,
         checked_in: true,
-        check_in_method: 'concierge',
+        check_in_method: 'paper_ocr',
         checked_in_at: new Date().toISOString(),
-        ocr_status: 'processing',
+        ocr_status: 'pending',
       })
       .select('id, koden_number')
       .single();
@@ -95,86 +93,49 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseAdmin();
 
-    // ① 番号の即時採番＆プレースホルダINSERT
+    // ① 受付番号の即時採番
     const { attendeeId, kodenNumber } = await assignNextNumber(
       supabase,
       ceremonyId
     );
 
-    // ② 画像をStorageにアップロード
+    // ② 画像をStorageにアップロード（OCRワーカーが後で読み出す）
     const imageBuffer = Buffer.from(await image.arrayBuffer());
-    const ext = image.name.split('.').pop() || 'jpg';
+    const ext = (image.name.split('.').pop() || 'jpg').toLowerCase();
     const storagePath = `${ceremonyId}/${attendeeId}.${ext}`;
+    const mimeType = image.type || 'image/jpeg';
     let publicPath: string | null = null;
 
     const { error: uploadError } = await supabase.storage
       .from('paper-forms')
       .upload(storagePath, imageBuffer, {
-        contentType: image.type || 'image/jpeg',
+        contentType: mimeType,
         upsert: true,
       });
 
     if (uploadError) {
       console.warn('画像アップロード失敗:', uploadError);
+      // 画像が無くてもOCRは走らせない方がいい
+      await supabase
+        .from('attendees')
+        .update({ ocr_status: 'failed', full_name: '(要確認)' })
+        .eq('id', attendeeId);
     } else {
       publicPath = storagePath;
+      // 画像保存パスをすぐ反映（OCR完了は別経路で UPDATE される）
+      await supabase
+        .from('attendees')
+        .update({ paper_image_url: publicPath })
+        .eq('id', attendeeId);
     }
 
-    // ③ OCR 実行（mimeTypeを渡してGeminiの画像理解精度を上げる）
-    let ocrFailed = false;
-    let ocrResult: Awaited<ReturnType<typeof processOcr>> | null = null;
-    try {
-      ocrResult = await processOcr(imageBuffer, image.type || undefined);
-    } catch (e) {
-      console.error('OCR実行エラー:', e);
-      ocrFailed = true;
-    }
-
-    // ④ attendeesを更新
-    const updatePayload: Record<string, any> = {
-      paper_image_url: publicPath,
-    };
-
-    if (ocrFailed || !ocrResult) {
-      updatePayload.ocr_status = 'failed';
-      updatePayload.full_name = '(要確認)';
-    } else {
-      const ex = ocrResult.extracted;
-      updatePayload.ocr_status = ocrResult.needs_review
-        ? 'review_needed'
-        : 'success';
-      updatePayload.ocr_confidence = ocrResult.overall_confidence;
-      updatePayload.ocr_extracted_fields = ex;
-      updatePayload.ocr_raw_text = ocrResult.raw_text;
-      updatePayload.full_name = ex.full_name?.value || '(要確認)';
-      updatePayload.postal_code = ex.postal_code?.value || null;
-      updatePayload.address = ex.address?.value || null;
-      updatePayload.relation = ex.relation?.value || null;
-      // ふりがなは007マイグレーションで追加した専用カラムへ
-      if (ex.furigana?.value) {
-        updatePayload.furigana = ex.furigana.value;
-      }
-    }
-
-    const { data: updated, error: updateError } = await supabase
-      .from('attendees')
-      .update(updatePayload)
-      .eq('id', attendeeId)
-      .select()
-      .single();
-
-    if (updateError) {
-      console.error('attendees更新エラー:', updateError);
-    }
-
+    // ③ 即時レスポンス（OCRはクライアントが別エンドポイントを叩く）
     return NextResponse.json({
       attendee_id: attendeeId,
       koden_number: kodenNumber,
-      ocr_status: updatePayload.ocr_status,
-      extracted: ocrResult?.extracted ?? {},
-      needs_review: ocrResult?.needs_review ?? true,
+      ocr_status: publicPath ? 'pending' : 'failed',
       image_path: publicPath,
-      attendee: updated,
+      mime_type: mimeType,
     });
   } catch (err: any) {
     console.error('scan route error:', err);

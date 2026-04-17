@@ -25,15 +25,9 @@ import toast from 'react-hot-toast';
 type ScanResponse = {
   attendee_id: string;
   koden_number: number;
-  ocr_status: 'success' | 'review_needed' | 'failed' | 'processing';
-  extracted: {
-    full_name?: { value: string; confidence: number };
-    furigana?: { value: string; confidence: number };
-    postal_code?: { value: string; confidence: number };
-    address?: { value: string; confidence: number };
-    relation?: { value: string; confidence: number };
-  };
-  needs_review: boolean;
+  ocr_status: 'pending' | 'failed';
+  image_path: string | null;
+  mime_type: string;
 };
 
 type ViewState = 'idle' | 'preview' | 'scanning' | 'result';
@@ -92,13 +86,14 @@ export default function ReceptionPage() {
 
     setViewState('scanning');
     try {
-      // ① 送信前にOCR向けに圧縮（iPhone写真の4.5MB制限超え対策＋転送高速化）
+      // ① 送信前にOCR向けに圧縮（4.5MB制限対策＋転送高速化）
       const compressed = await compressImageForOcr(file);
 
       const form = new FormData();
       form.append('ceremony_id', ceremonyId);
       form.append('image', compressed);
 
+      // ② scan: 番号採番＋画像保存だけの「高速パス」（〜1〜2秒）
       const res = await fetch('/api/reception/scan', {
         method: 'POST',
         body: form,
@@ -108,9 +103,29 @@ export default function ReceptionPage() {
         throw new Error(err?.error || `スキャンに失敗しました (HTTP ${res.status})`);
       }
       const json = (await res.json()) as ScanResponse;
+
+      // ③ 番号を即時表示。スタッフはここで「次の方」と言える
       setResult(json);
       setViewState('result');
       fetchTodayCount();
+
+      // ④ OCRはバックグラウンドで非同期実行（keepaliveでタブ離脱しても継続）
+      if (json.image_path) {
+        try {
+          fetch('/api/reception/process-ocr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              attendee_id: json.attendee_id,
+              image_path: json.image_path,
+              mime_type: json.mime_type,
+            }),
+            keepalive: true,
+          }).catch((e) => console.warn('OCRワーカー起動失敗:', e));
+        } catch (e) {
+          console.warn('OCR起動例外:', e);
+        }
+      }
     } catch (err: any) {
       console.error(err);
       toast.error(err?.message || 'スキャンに失敗しました');
@@ -264,13 +279,61 @@ function ResultView({
   result: ScanResponse;
   onNext: () => void;
 }) {
-  const { koden_number, extracted, ocr_status, needs_review } = result;
+  const { koden_number, attendee_id, ocr_status: initialStatus } = result;
+
+  // OCRはバックグラウンドで走る。結果が返ってきたら表示するため Realtime + ポーリング
+  const [ocrStatus, setOcrStatus] = useState<string>(initialStatus);
+  const [extracted, setExtracted] = useState<{
+    full_name?: { value: string; confidence: number };
+    furigana?: { value: string; confidence: number };
+    postal_code?: { value: string; confidence: number };
+    address?: { value: string; confidence: number };
+    relation?: { value: string; confidence: number };
+  } | null>(null);
+
+  useEffect(() => {
+    if (initialStatus === 'failed') return;
+
+    let cancelled = false;
+    const tick = async () => {
+      const { data } = await supabase
+        .from('attendees')
+        .select('ocr_status, ocr_extracted_fields, full_name, furigana, postal_code, address, relation')
+        .eq('id', attendee_id)
+        .single();
+      if (cancelled || !data) return;
+      setOcrStatus(data.ocr_status || 'pending');
+      if (data.ocr_extracted_fields) {
+        setExtracted(data.ocr_extracted_fields as any);
+      }
+    };
+
+    // 即時1回 + 2秒ポーリング（OCR完了は通常3-6秒）
+    tick();
+    const id = setInterval(() => {
+      if (cancelled) return;
+      tick().then(() => {
+        if (cancelled) return;
+        // 完了/失敗したらポーリング停止
+      });
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [attendee_id, initialStatus]);
+
   const bgColor =
-    ocr_status === 'failed'
+    ocrStatus === 'failed'
       ? 'bg-red-50'
-      : needs_review
+      : ocrStatus === 'review_needed'
       ? 'bg-yellow-50'
-      : 'bg-green-50';
+      : ocrStatus === 'success'
+      ? 'bg-green-50'
+      : 'bg-accent-cream';
+
+  const isProcessing = ocrStatus === 'pending' || ocrStatus === 'processing';
 
   return (
     <div className={`card ${bgColor}`}>
@@ -284,13 +347,18 @@ function ResultView({
         </p>
       </div>
 
-      {/* OCR結果ステータス */}
+      {/* OCR状態 */}
       <div className="bg-white rounded-lg p-4 mb-4 border-2 border-gray-200">
-        {ocr_status === 'failed' ? (
+        {isProcessing ? (
+          <p className="text-sm text-gray-700 flex items-center gap-2">
+            <span className="inline-block w-4 h-4 border-2 border-accent-dark border-t-transparent rounded-full animate-spin"></span>
+            読み取り処理中… 結果を待たずに「次の方」へ進めます
+          </p>
+        ) : ocrStatus === 'failed' ? (
           <p className="text-sm text-red-700 font-semibold">
             ⚠ 読み取りに失敗しました。後でダッシュボードから内容を確認してください。
           </p>
-        ) : needs_review ? (
+        ) : ocrStatus === 'review_needed' ? (
           <p className="text-sm text-yellow-800 font-semibold mb-2">
             ⚠ 一部の項目の読み取り精度が低いため「要確認」となりました
           </p>
@@ -300,13 +368,15 @@ function ResultView({
           </p>
         )}
 
-        <dl className="text-sm space-y-1.5 mt-3">
-          <FieldRow label="氏名" field={extracted.full_name} />
-          <FieldRow label="ふりがな" field={extracted.furigana} />
-          <FieldRow label="郵便番号" field={extracted.postal_code} />
-          <FieldRow label="住所" field={extracted.address} />
-          <FieldRow label="ご関係" field={extracted.relation} />
-        </dl>
+        {extracted && (
+          <dl className="text-sm space-y-1.5 mt-3">
+            <FieldRow label="氏名" field={extracted.full_name} />
+            <FieldRow label="ふりがな" field={extracted.furigana} />
+            <FieldRow label="郵便番号" field={extracted.postal_code} />
+            <FieldRow label="住所" field={extracted.address} />
+            <FieldRow label="ご関係" field={extracted.relation} />
+          </dl>
+        )}
       </div>
 
       <button
