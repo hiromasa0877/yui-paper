@@ -84,16 +84,32 @@ export default function ReceptionPage() {
     const file = selectedFileRef.current;
     if (!file) return;
 
+    // オフライン時は明示的に警告して中断（要望次第でローカル番号採番に拡張可）
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      toast.error(
+        '電波がありません。電波が回復してから再撮影してください。\n（端末ローカルへの一時保存は今後実装予定）',
+        { duration: 5000 }
+      );
+      return;
+    }
+
     setViewState('scanning');
     try {
       // ① 送信前にOCR向けに圧縮（4.5MB制限対策＋転送高速化）
       const compressed = await compressImageForOcr(file);
 
+      // ② client_ref を発行（ネットワーク再送による二重INSERT防止）
+      const clientRef =
+        typeof crypto !== 'undefined' && 'randomUUID' in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
       const form = new FormData();
       form.append('ceremony_id', ceremonyId);
       form.append('image', compressed);
+      form.append('client_ref', clientRef);
 
-      // ② scan: 番号採番＋画像保存だけの「高速パス」（〜1〜2秒）
+      // ③ scan: 番号採番＋画像保存だけの「高速パス」（〜1〜2秒）
       const res = await fetch('/api/reception/scan', {
         method: 'POST',
         body: form,

@@ -138,6 +138,27 @@ export default function ReviewPage() {
     }
   };
 
+  // キーボードショートカット
+  //   Ctrl+Enter: 確定して次へ
+  //   Ctrl+→     : スキップして次へ
+  //   Esc        : フォーカスをクリア（誤操作防止）
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleConfirm();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'ArrowRight') {
+        e.preventDefault();
+        handleSkip();
+      } else if (e.key === 'Escape') {
+        (document.activeElement as HTMLElement | null)?.blur();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIdx, formName, formFurigana, formPostalCode, formAddress, formRelation, reviewItems]);
+
   return (
     <div className="min-h-screen bg-accent-cream">
       <Header backButton={true} />

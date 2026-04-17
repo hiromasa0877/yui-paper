@@ -234,6 +234,13 @@ export default function DashboardPage() {
     kumotsu: attendees.filter((a) => a.has_kumotsu).length,
     chouden: attendees.filter((a) => a.has_chouden).length,
     other: attendees.filter((a) => a.has_other_offering).length,
+    // OCR要確認：撮影済だが信頼度低 or OCR失敗
+    ocrPending: attendees.filter(
+      (a: any) => a.ocr_status === 'pending' || a.ocr_status === 'processing'
+    ).length,
+    ocrReviewNeeded: attendees.filter(
+      (a: any) => a.ocr_status === 'review_needed' || a.ocr_status === 'failed'
+    ).length,
   };
 
   const handleExportCsv = () => {
@@ -309,7 +316,47 @@ export default function DashboardPage() {
                 className="px-4 py-2 bg-yellow-500 text-white text-sm font-semibold rounded-lg hover:opacity-90"
               >
                 ⚠ 要確認レビュー
+                {stats.ocrReviewNeeded > 0 && (
+                  <span className="ml-2 inline-flex items-center justify-center min-w-[1.5em] h-5 px-1.5 text-xs bg-white text-yellow-700 rounded-full font-bold">
+                    {stats.ocrReviewNeeded}
+                  </span>
+                )}
               </Link>
+            </div>
+          </div>
+        )}
+
+        {/* OCR処理状況リマインダー（pending or review_neededがある時のみ表示） */}
+        {(stats.ocrPending > 0 || stats.ocrReviewNeeded > 0) && (
+          <div className="mb-6 card bg-yellow-50 border-2 border-yellow-300">
+            <div className="flex items-start gap-3">
+              <div className="text-2xl">📋</div>
+              <div className="flex-1">
+                <p className="font-bold text-yellow-900">未処理のOCRがあります</p>
+                <p className="text-sm text-yellow-800 mt-1">
+                  {stats.ocrPending > 0 && (
+                    <span className="mr-4">
+                      🔄 処理待ち <strong>{stats.ocrPending}</strong>件
+                    </span>
+                  )}
+                  {stats.ocrReviewNeeded > 0 && (
+                    <span>
+                      ⚠ 要確認 <strong>{stats.ocrReviewNeeded}</strong>件
+                    </span>
+                  )}
+                </p>
+                <p className="text-xs text-yellow-700 mt-2">
+                  ※ OCRが完了してから別室で香典袋を開封・金額入力するのが安全です。
+                </p>
+              </div>
+              {stats.ocrReviewNeeded > 0 && (
+                <Link
+                  href={`/review/${ceremonyId}`}
+                  className="px-4 py-2 bg-yellow-600 text-white text-sm font-semibold rounded-lg hover:opacity-90 whitespace-nowrap"
+                >
+                  確認する →
+                </Link>
+              )}
             </div>
           </div>
         )}

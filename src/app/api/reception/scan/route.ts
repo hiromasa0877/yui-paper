@@ -34,9 +34,31 @@ function getSupabaseAdmin() {
   });
 }
 
+/**
+ * 既存のclient_refを再利用して冪等にレコードを返す。
+ * 同じclient_refで2回呼ばれても1件しか作られない。
+ * @returns 既存レコードがあれば true / 新規作成すべきなら false
+ */
+async function findExistingByClientRef(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  clientRef: string | null
+): Promise<{ attendeeId: string; kodenNumber: number } | null> {
+  if (!clientRef) return null;
+  const { data } = await supabase
+    .from('attendees')
+    .select('id, koden_number')
+    .eq('client_ref', clientRef)
+    .maybeSingle();
+  if (data && data.koden_number != null) {
+    return { attendeeId: data.id, kodenNumber: data.koden_number };
+  }
+  return null;
+}
+
 async function assignNextNumber(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   ceremonyId: string,
+  clientRef: string | null,
   maxRetries = 8
 ): Promise<{ attendeeId: string; kodenNumber: number }> {
   let lastError: any = null;
@@ -60,6 +82,7 @@ async function assignNextNumber(
         check_in_method: 'paper_ocr',
         checked_in_at: new Date().toISOString(),
         ocr_status: 'pending',
+        client_ref: clientRef,
       })
       .select('id, koden_number')
       .single();
@@ -68,9 +91,16 @@ async function assignNextNumber(
       return { attendeeId: data.id, kodenNumber: data.koden_number };
     }
     lastError = error;
+    // 23505 は (ceremony_id, koden_number) または client_ref の重複
+    // client_ref 衝突なら既存レコードを返却（冪等性）
+    if (error?.code === '23505' && clientRef) {
+      const existing = await findExistingByClientRef(supabase, clientRef);
+      if (existing) return existing;
+    }
     if (error?.code !== '23505') {
       throw error ?? new Error('insert failed');
     }
+    // それ以外（番号衝突）はretry
   }
   throw lastError ?? new Error('番号採番リトライ上限');
 }
@@ -80,6 +110,11 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData();
     const ceremonyId = formData.get('ceremony_id');
     const image = formData.get('image');
+    const clientRefRaw = formData.get('client_ref');
+    const clientRef =
+      typeof clientRefRaw === 'string' && /^[0-9a-f-]{36}$/i.test(clientRefRaw)
+        ? clientRefRaw
+        : null;
 
     if (typeof ceremonyId !== 'string') {
       return NextResponse.json(
@@ -93,10 +128,25 @@ export async function POST(req: NextRequest) {
 
     const supabase = getSupabaseAdmin();
 
-    // ① 受付番号の即時採番
+    // ⓪ client_ref 既存チェック（同じ撮影が再送された場合は同じ番号を返す）
+    const existing = await findExistingByClientRef(supabase, clientRef);
+    if (existing) {
+      // 既に画像とOCRが走っているはず。リクエスト元には同じ番号を返す。
+      return NextResponse.json({
+        attendee_id: existing.attendeeId,
+        koden_number: existing.kodenNumber,
+        ocr_status: 'pending',
+        image_path: null, // 実際のpathは別経路で同期されている
+        mime_type: image.type || 'image/jpeg',
+        idempotent: true,
+      });
+    }
+
+    // ① 受付番号の即時採番（client_ref付与）
     const { attendeeId, kodenNumber } = await assignNextNumber(
       supabase,
-      ceremonyId
+      ceremonyId,
+      clientRef
     );
 
     // ② 画像をStorageにアップロード（OCRワーカーが後で読み出す）
