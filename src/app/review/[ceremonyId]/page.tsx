@@ -18,12 +18,8 @@ import { Attendee, Ceremony } from '@/types/database';
 import { formatKodenNumber } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
-type ReviewAttendee = Attendee & {
-  paper_image_url?: string | null;
-  ocr_status?: string | null;
-  ocr_confidence?: number | null;
-  ocr_extracted_fields?: any;
-};
+// OCR系フィールドは Attendee に統合済み（types/database.ts 参照）
+type ReviewAttendee = Attendee;
 
 export default function ReviewPage() {
   const params = useParams();
@@ -79,9 +75,13 @@ export default function ReviewPage() {
     setFormPostalCode(item.postal_code || '');
     setFormAddress(item.address || '');
     setFormRelation(item.relation || '');
-    // ふりがなはnotesに退避されている場合がある
-    const furiMatch = item.notes?.match(/ふりがな: (.+)/);
-    setFormFurigana(furiMatch?.[1] || '');
+    // 007マイグレーション後は専用カラム、未適用環境向けに notes フォールバックも残す
+    if (item.furigana) {
+      setFormFurigana(item.furigana);
+    } else {
+      const furiMatch = item.notes?.match(/ふりがな: (.+)/);
+      setFormFurigana(furiMatch?.[1] || '');
+    }
   };
 
   const current = reviewItems[currentIdx] || null;
@@ -105,7 +105,7 @@ export default function ReviewPage() {
         postal_code: formPostalCode.trim() || null,
         address: formAddress.trim() || null,
         relation: formRelation || null,
-        notes: formFurigana ? `ふりがな: ${formFurigana}` : current.notes,
+        furigana: formFurigana.trim() || null,
         ocr_status: 'success',
       })
       .eq('id', current.id);

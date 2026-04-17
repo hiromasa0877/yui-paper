@@ -10,10 +10,38 @@ export type Ceremony = {
   qr_code_url: string | null;
 };
 
+export type OcrStatus =
+  | 'pending'
+  | 'processing'
+  | 'success'
+  | 'failed'
+  | 'review_needed';
+
+/**
+ * OCRで抽出した個別フィールドのスニペット。
+ * lib/ocr.ts の Gemini 出力スキーマと対応。
+ */
+export type OcrExtractedField = {
+  value: string | null;
+  confidence: number | null;
+};
+
+export type OcrExtractedFields = {
+  full_name?: OcrExtractedField;
+  furigana?: OcrExtractedField;
+  postal_code?: OcrExtractedField;
+  address?: OcrExtractedField;
+  phone?: OcrExtractedField;
+  relation?: OcrExtractedField;
+  // 任意の追加フィールドも許容
+  [key: string]: OcrExtractedField | undefined;
+};
+
 export type Attendee = {
   id: string;
   ceremony_id: string;
   full_name: string;
+  furigana: string | null;
   postal_code: string | null;
   address: string | null;
   phone: string | null;
@@ -28,6 +56,13 @@ export type Attendee = {
   has_chouden: boolean;
   has_other_offering: boolean;
   other_offering_note: string | null;
+  // --- 紙OCR関連（マイグレーション006で追加） ---
+  paper_image_url: string | null;
+  ocr_status: OcrStatus | null;
+  ocr_confidence: number | null;
+  ocr_extracted_fields: OcrExtractedFields | null;
+  ocr_raw_text: string | null;
+  // ---
   created_at: string;
   checked_in_at: string | null;
   updated_at: string;

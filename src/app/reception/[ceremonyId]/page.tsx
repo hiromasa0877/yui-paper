@@ -19,6 +19,7 @@ import { useParams } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
 import { Ceremony } from '@/types/database';
 import { formatKodenNumber } from '@/lib/utils';
+import { compressImageForOcr } from '@/lib/image-utils';
 import toast from 'react-hot-toast';
 
 type ScanResponse = {
@@ -91,9 +92,12 @@ export default function ReceptionPage() {
 
     setViewState('scanning');
     try {
+      // ① 送信前にOCR向けに圧縮（iPhone写真の4.5MB制限超え対策＋転送高速化）
+      const compressed = await compressImageForOcr(file);
+
       const form = new FormData();
       form.append('ceremony_id', ceremonyId);
-      form.append('image', file);
+      form.append('image', compressed);
 
       const res = await fetch('/api/reception/scan', {
         method: 'POST',

@@ -21,6 +21,9 @@ import { processOcr } from '@/lib/ocr';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+// OCR (Vision + Gemini multimodal) には数秒かかることがあるため上限を引き上げる
+// Vercel Hobbyプランは最大60秒。Pro以上は300秒まで延長可能。
+export const maxDuration = 60;
 
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -117,11 +120,11 @@ export async function POST(req: NextRequest) {
       publicPath = storagePath;
     }
 
-    // ③ OCR 実行
+    // ③ OCR 実行（mimeTypeを渡してGeminiの画像理解精度を上げる）
     let ocrFailed = false;
     let ocrResult: Awaited<ReturnType<typeof processOcr>> | null = null;
     try {
-      ocrResult = await processOcr(imageBuffer);
+      ocrResult = await processOcr(imageBuffer, image.type || undefined);
     } catch (e) {
       console.error('OCR実行エラー:', e);
       ocrFailed = true;
@@ -147,9 +150,9 @@ export async function POST(req: NextRequest) {
       updatePayload.postal_code = ex.postal_code?.value || null;
       updatePayload.address = ex.address?.value || null;
       updatePayload.relation = ex.relation?.value || null;
-      // ふりがなはnotesに退避（既存スキーマに専用列がないため）
+      // ふりがなは007マイグレーションで追加した専用カラムへ
       if (ex.furigana?.value) {
-        updatePayload.notes = `ふりがな: ${ex.furigana.value}`;
+        updatePayload.furigana = ex.furigana.value;
       }
     }
 
