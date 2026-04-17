@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>芳名用紙 パターン3（従来型・自由記述）</title>
+<style>
+  @page {
+    size: A6 landscape;
+    margin: 0;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Yu Mincho', 'Hiragino Mincho Pro', 'MS Mincho', serif;
+    background: #f0f0f0;
+    padding: 20px;
+  }
+
+  .page {
+    width: 148mm;
+    height: 105mm;
+    background: white;
+    margin: 0 auto 20px;
+    padding: 7mm 9mm;
+    position: relative;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    overflow: hidden;
+  }
+
+  @media print {
+    body { background: white; padding: 0; }
+    .page { box-shadow: none; margin: 0; page-break-after: always; }
+    .print-caption { display: none; }
+  }
+
+  .page-title {
+    font-size: 13pt;
+    font-weight: bold;
+    color: #1a1a2e;
+    text-align: center;
+    margin-bottom: 1mm;
+    letter-spacing: 0.3em;
+  }
+
+  .page-subtitle {
+    font-size: 7pt;
+    color: #888;
+    text-align: center;
+    margin-bottom: 3mm;
+    font-family: sans-serif;
+  }
+
+  .mgmt-number {
+    position: absolute;
+    top: 4.5mm;
+    right: 8mm;
+    border: 2.5pt double #1a1a2e;
+    padding: 1mm 4mm;
+    font-size: 22pt;
+    font-weight: bold;
+    color: #c9a962;
+    font-family: 'Arial Black', sans-serif;
+    background: white;
+    line-height: 1;
+  }
+
+  .mgmt-label {
+    font-size: 6pt;
+    color: #333;
+    display: block;
+    text-align: center;
+    font-weight: normal;
+    margin-bottom: 0.5mm;
+    font-family: sans-serif;
+    letter-spacing: 0.1em;
+  }
+
+  .field-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: sans-serif;
+  }
+
+  .field-table td {
+    border-bottom: 0.3mm solid #555;
+    padding: 2.5mm 1mm 1.5mm;
+    vertical-align: bottom;
+  }
+
+  .field-table .label-cell {
+    width: 16mm;
+    font-size: 8.5pt;
+    font-weight: bold;
+    color: #333;
+    vertical-align: middle;
+    border-bottom: 0.3mm solid #555;
+    padding-bottom: 1.5mm;
+  }
+
+  .field-table .value-cell {
+    height: 7mm;
+  }
+
+  .field-table .value-cell.tall {
+    height: 13mm;
+  }
+
+  .checkbox-group {
+    display: flex;
+    gap: 2.5mm;
+    font-family: sans-serif;
+  }
+
+  .checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 1mm;
+    font-size: 8.5pt;
+  }
+
+  .checkbox {
+    width: 4mm;
+    height: 4mm;
+    border: 0.4mm solid #333;
+  }
+
+  .footer {
+    position: absolute;
+    bottom: 3mm;
+    left: 9mm;
+    right: 9mm;
+    font-size: 6.5pt;
+    color: #888;
+    text-align: center;
+    padding-top: 1mm;
+    font-family: sans-serif;
+  }
+
+  .print-caption {
+    text-align: center;
+    color: #666;
+    font-size: 10pt;
+    margin-bottom: 10px;
+    max-width: 148mm;
+    margin-left: auto;
+    margin-right: auto;
+    font-family: sans-serif;
+  }
+</style>
+</head>
+<body>
+
+<div class="print-caption">
+  <strong>パターン3: 従来型（自由記述）</strong><br>
+  従来の芳名帳に最も近い。書きやすいがOCR精度は3案中もっとも厳しい。
+</div>
+
+<div class="page">
+  <div class="mgmt-number">
+    <span class="mgmt-label">管理番号</span>
+    001
+  </div>
+
+  <div class="page-title">芳　名　帳</div>
+  <div class="page-subtitle">ご記帳ありがとうございます</div>
+
+  <table class="field-table">
+    <tr>
+      <td class="label-cell">ふりがな</td>
+      <td class="value-cell"></td>
+    </tr>
+    <tr>
+      <td class="label-cell">お名前</td>
+      <td class="value-cell"></td>
+    </tr>
+    <tr>
+      <td class="label-cell">〒 郵便番号</td>
+      <td class="value-cell"></td>
+    </tr>
+    <tr>
+      <td class="label-cell">ご住所</td>
+      <td class="value-cell tall"></td>
+    </tr>
+    <tr>
+      <td class="label-cell">ご関係</td>
+      <td class="value-cell">
+        <div class="checkbox-group">
+          <div class="checkbox-item"><div class="checkbox"></div>ご親族</div>
+          <div class="checkbox-item"><div class="checkbox"></div>ご友人</div>
+          <div class="checkbox-item"><div class="checkbox"></div>会社</div>
+          <div class="checkbox-item"><div class="checkbox"></div>ご近所</div>
+          <div class="checkbox-item"><div class="checkbox"></div>その他</div>
+        </div>
+      </td>
+    </tr>
+  </table>
+
+  <div class="footer">
+    ※ 香典袋にも右上の管理番号をご記入ください
+  </div>
+</div>
+
+<div class="print-caption" style="margin-top: 20px;">
+  ブラウザの印刷機能（Ctrl+P）→ 用紙サイズ「A6」→ 向き「横」で印刷できます
+</div>
+
+</body>
+</html>

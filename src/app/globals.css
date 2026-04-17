@@ -1,0 +1,183 @@
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700;900&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary-dark: #1a1a2e;
+  --primary-gold: #c9a962;
+  --primary-cream: #f5f2eb;
+  --primary-teal: #3a7c8c;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: 'Noto Sans JP', sans-serif;
+  background-color: var(--primary-cream);
+  color: var(--primary-dark);
+  overflow-x: hidden;
+}
+
+/* iOS specific styles */
+input,
+select,
+textarea {
+  font-size: 16px;
+}
+
+input::-webkit-outer-spin-button,
+input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type='number'] {
+  -moz-appearance: textfield;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--primary-cream);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary-gold);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary-teal);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scaleUp {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes checkmark {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+.animate-scale-up {
+  animation: scaleUp 0.5s ease-in-out;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.5s ease-in-out;
+}
+
+.animate-checkmark {
+  animation: checkmark 0.6s ease-in-out;
+}
+
+/* Utility classes */
+.btn-primary {
+  @apply px-6 py-3 bg-accent-dark text-white font-semibold rounded-lg hover:opacity-90 transition-all active:scale-95;
+}
+
+.btn-secondary {
+  @apply px-6 py-3 bg-accent-gold text-white font-semibold rounded-lg hover:opacity-90 transition-all active:scale-95;
+}
+
+.btn-outline {
+  @apply px-6 py-3 border-2 border-accent-dark text-accent-dark font-semibold rounded-lg hover:bg-accent-dark hover:text-white transition-all;
+}
+
+.card {
+  @apply bg-white rounded-lg shadow-md p-6;
+}
+
+.input-base {
+  @apply w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-accent-teal transition-colors;
+}
+
+/* Prevent zoom on input focus for iOS */
+@media (max-width: 768px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* Responsive container */
+@media (min-width: 640px) {
+  .container-sm {
+    max-width: 640px;
+  }
+}
+
+@media (min-width: 768px) {
+  .container-md {
+    max-width: 768px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .container-lg {
+    max-width: 1024px;
+  }
+}
+
+/* Print styles */
+@media print {
+  body {
+    background-color: white;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+}

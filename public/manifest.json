@@ -1,0 +1,12 @@
+{
+  "name": "結（ゆい）レセプション",
+  "short_name": "結レセプション",
+  "description": "葬儀受付DXサービス - 参列者・香典管理",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f2eb",
+  "theme_color": "#1a1a2e",
+  "lang": "ja",
+  "orientation": "portrait-primary",
+  "icons": []
+}
