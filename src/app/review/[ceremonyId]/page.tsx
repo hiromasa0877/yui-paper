@@ -86,10 +86,30 @@ export default function ReviewPage() {
 
   const current = reviewItems[currentIdx] || null;
 
-  const imageUrl = current?.paper_image_url
-    ? supabase.storage.from('paper-forms').getPublicUrl(current.paper_image_url)
-        .data.publicUrl
-    : null;
+  // Private バケットのため署名付きURLを取得（有効期間1時間）
+  const [imageUrl, setImageUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!current?.paper_image_url) {
+      setImageUrl(null);
+      return;
+    }
+    (async () => {
+      const { data, error } = await supabase.storage
+        .from('paper-forms')
+        .createSignedUrl(current.paper_image_url!, 60 * 60);
+      if (cancelled) return;
+      if (error) {
+        console.warn('署名付きURL取得失敗', error);
+        setImageUrl(null);
+      } else {
+        setImageUrl(data?.signedUrl ?? null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [current?.id, current?.paper_image_url]);
 
   const handleConfirm = async () => {
     if (!current) return;

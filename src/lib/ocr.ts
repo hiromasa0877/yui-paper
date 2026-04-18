@@ -1,19 +1,20 @@
 /**
- * OCR パイプライン: Google Cloud Vision + Gemini 2.5 Flash (multimodal)
+ * OCR パイプライン: Google Cloud Vision 単独
  *
- * 役割分担:
- *  - Vision API : 画像 → 全文テキスト（手書き対応、日本語ヒント付き）
- *  - Gemini     : 画像 + Visionテキスト → 構造化フィールド
- *                 ※ Geminiにも画像を直接渡すことで、Visionが誤読した文字を
- *                   画像から再判定できるようになり大幅に精度が上がる。
+ * 設計方針:
+ *  葬儀の芳名帳は「氏名:」「ふりがな:」「住所:」「郵便番号:」などのラベルが
+ *  印字されているものがほとんど。Vision API (DOCUMENT_TEXT_DETECTION) で
+ *  手書きを含むテキストを全文抽出し、キーワードベースで構造化する。
  *
- * なぜ2段構えか:
- *  式場ごとに芳名帳のレイアウトがバラバラなので、位置ベースのテンプレート抽出は成立しない。
- *  Vision のテキスト化は誤りを含むため、Gemini に「画像を見ながら検証してね」と頼む。
+ *  Gemini を呼ぶ従来方式よりも:
+ *   - 速い（1〜2秒）
+ *   - コスト低（Vision 無料枠内で収まる葬儀多数）
+ *   - 失敗モードが少ない（空応答 `{}` が返る問題がなくなる）
+ *
+ *  任意レイアウト対応はまだ弱いため、信頼度低めのフィールドは review 画面へ振る。
  */
 
 import { ImageAnnotatorClient } from '@google-cloud/vision';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
 export type OcrExtractedFields = {
   full_name?: { value: string; confidence: number };
@@ -33,17 +34,6 @@ export type OcrResult = {
 // 信頼度しきい値: これを下回るフィールドが1つでもあれば「要確認」
 const REVIEW_THRESHOLD = 0.7;
 
-// Gemini モデル名（フォールバック順）
-// gemini-2.5-flash は @google/generative-ai SDK 0.21.0 では未認識のため、
-// 安定版の 2.0-flash をプライマリに、1.5-flash をフォールバックに。
-// 環境変数 GEMINI_MODEL を設定すれば最優先で試行される。
-const GEMINI_MODEL_CANDIDATES = [
-  process.env.GEMINI_MODEL,
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
-].filter((m): m is string => !!m && m.length > 0);
-
 let visionClient: ImageAnnotatorClient | null = null;
 function getVisionClient(): ImageAnnotatorClient {
   if (visionClient) return visionClient;
@@ -54,15 +44,6 @@ function getVisionClient(): ImageAnnotatorClient {
   const credentials = JSON.parse(credentialsJson);
   visionClient = new ImageAnnotatorClient({ credentials });
   return visionClient;
-}
-
-let geminiClient: GoogleGenerativeAI | null = null;
-function getGeminiClient(): GoogleGenerativeAI {
-  if (geminiClient) return geminiClient;
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY env var is not set');
-  geminiClient = new GoogleGenerativeAI(apiKey);
-  return geminiClient;
 }
 
 /**
@@ -77,14 +58,12 @@ async function runVisionOcr(imageBuffer: Buffer): Promise<{
   const [result] = await client.documentTextDetection({
     image: { content: imageBuffer },
     imageContext: {
-      // 日本語に最適化（多言語モデルから日本語特化モデルに切り替わる）
       languageHints: ['ja'],
     },
   });
 
   const fullText = result.fullTextAnnotation?.text ?? '';
 
-  // ブロックごとの平均信頼度を計算
   let sum = 0;
   let count = 0;
   for (const page of result.fullTextAnnotation?.pages ?? []) {
@@ -101,180 +80,146 @@ async function runVisionOcr(imageBuffer: Buffer): Promise<{
 }
 
 /**
- * Gemini に画像 + Visionテキストを渡して構造化抽出
+ * 芳名帳テキストからキーワードで各フィールドを抽出する。
  *
- * - 画像を直接渡すことで、Visionが誤読した文字を Gemini が再判定可能に
- * - 利用可能な最新モデルを順に試す（2.5 → 2.0 → 1.5）
+ * ラベルと値は改行あり・なし両方に対応。
+ * ラベルの同義語も吸収（例: 名前/御芳名/ご芳名 → full_name）。
  */
-async function runGeminiExtraction(
+function parseAttendeeFields(
   rawText: string,
-  imageBuffer: Buffer,
-  mimeType: string
-): Promise<OcrExtractedFields> {
-  const gen = getGeminiClient();
+  overallConfidence: number
+): OcrExtractedFields {
+  const lines = rawText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 
-  const prompt = `あなたは葬儀の芳名帳から参列者情報を抽出する専門アシスタントです。
-画像に写っている日本人の手書き文字を慎重に読み取ってください。
+  // ラベル正規化マップ
+  const labelMap: Array<{
+    keys: RegExp;
+    field: keyof OcrExtractedFields;
+  }> = [
+    { keys: /^(氏名|お名前|御芳名|ご芳名|名前|姓名)[:：]?$/, field: 'full_name' },
+    { keys: /^(ふりがな|フリガナ|ふりがな|振仮名)[:：]?$/, field: 'furigana' },
+    { keys: /^(郵便番号|〒|ゆうびん番号)[:：]?$/, field: 'postal_code' },
+    { keys: /^(住所|ご住所|お住まい|現住所)[:：]?$/, field: 'address' },
+    { keys: /^(電話|電話番号|連絡先|TEL|Tel|tel)[:：]?$/, field: 'relation' }, // 電話は使い道なし
+    { keys: /^(関係|ご関係|故人との関係)[:：]?$/, field: 'relation' },
+  ];
 
-【入力】
-1) 添付画像: 紙の芳名帳をカメラで撮影したもの（手書き）
-2) 参考テキスト: Google Vision OCR が同じ画像を読み取った結果（誤読を含む可能性あり）
+  const fields: OcrExtractedFields = {};
 
-【最重要ルール】
-- **画像を一次情報として優先**してください。Vision OCR テキストは補助参考程度です。
-- Vision OCR が誤読していると判断したら、画像から読み取った文字を採用してください。
-- 「氏名」欄の文字は特に丁寧に読み取ってください。崩し字・略字も葬儀で使われがちな苗字を念頭に推測してください。
+  // パス1: 1行に「ラベル: 値」形式
+  const inline: Array<{ field: keyof OcrExtractedFields; value: string }> = [];
+  for (const line of lines) {
+    // 「氏名: 荻野寛真」「住所：埼玉県…」形式
+    const m = line.match(
+      /^(氏名|お名前|御芳名|ご芳名|名前|姓名|ふりがな|フリガナ|振仮名|郵便番号|〒|住所|ご住所|お住まい|現住所|電話|電話番号|連絡先|関係|ご関係|故人との関係)\s*[:：]\s*(.+)$/
+    );
+    if (m) {
+      const labelRaw = m[1];
+      const value = m[2].trim();
+      const label = normalizeLabel(labelRaw);
+      if (label && value) inline.push({ field: label, value });
+    }
+  }
+  for (const { field, value } of inline) {
+    setField(fields, field, value, overallConfidence);
+  }
 
-【日本人氏名の読み取り注意】
-葬儀芳名帳でよく登場する旧字体・異体字（旧字優先で記載されることが多い）:
-  齋藤/斎藤/斉藤、髙橋/高橋、邊/邉/辺、渡邊/渡邉/渡辺、櫻井/桜井、
-  廣瀬/広瀬、栁澤/柳沢、嶋田/島田、尾﨑/尾崎、宮﨑/宮崎、福澤/福沢、
-  内藤、髙田/高田、德/徳、藏/蔵、龍/竜、瀧/滝、澤/沢
-画像で旧字体が書かれていたら、新字に変換せずそのまま採用してください。
-
-【数字の読み取り注意】
-郵便番号、住所の番地、電話番号は「1」と「7」、「3」と「8」、「0」と「6」、「9」と「4」を
-取り違えやすいです。確信が持てない数字は confidence を下げてください（誤った高信頼度より要確認の方が遥かに親切）。
-
-【抽出対象】
-- full_name: 参列者の氏名（漢字表記、姓名の間に半角スペース）
-- furigana: ふりがな（ひらがな、カタカナの場合はひらがなに変換）
-- postal_code: 郵便番号（7桁、ハイフンなし、半角数字）
-- address: 住所（都道府県から含む完全な形）
-- relation: 故人との関係。次のいずれか:
-    "親族" / "友人" / "会社関係" / "近所" / "その他" / ""
-
-【信頼度の付け方（重要）】
-各フィールドに confidence（0.0〜1.0の数値）を付けてください。基準:
-- 1.0 : 画像から明確に読み取れた／OCRと完全一致
-- 0.8 : 画像から読み取れたが一部不明瞭
-- 0.5 : 推測込み（崩し字、欠損、暗い等）
-- 0.3 : かなり怪しい（要確認候補）
-- 0.0 : 該当欄が空白／読み取り不能
-
-判断に迷う場合は信頼度を低くして「要確認」に振り分けてください。誤った高信頼度より遥かに親切です。
-
-【出力JSONスキーマ】（必ずこの形式で返答）
-{
-  "full_name":   { "value": "山田 太郎", "confidence": 0.0 },
-  "furigana":    { "value": "やまだ たろう", "confidence": 0.0 },
-  "postal_code": { "value": "1234567", "confidence": 0.0 },
-  "address":     { "value": "東京都新宿区西新宿1-2-3", "confidence": 0.0 },
-  "relation":    { "value": "", "confidence": 0.0 }
-}
-
-【参考: Vision OCR テキスト】
----
-${rawText || '(空)'}
----
-
-JSONのみを返答してください。コードブロックや前後の説明文は不要です。`;
-
-  const imagePart = {
-    inlineData: {
-      mimeType: mimeType,
-      data: imageBuffer.toString('base64'),
-    },
-  };
-
-  let lastError: any = null;
-  for (const modelName of GEMINI_MODEL_CANDIDATES) {
-    try {
-      console.log(`[ocr] Geminiモデル試行: ${modelName}`);
-      const model = gen.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      });
-
-      const result = await model.generateContent([prompt, imagePart]);
-      const responseText = result.response.text();
-      console.log(
-        `[ocr] Gemini ${modelName} 応答長: ${responseText.length} chars, 先頭200: ${responseText.substring(0, 200)}`
-      );
-
-      // 空応答は明確に失敗扱いにして次のモデルへ
-      if (!responseText.trim() || responseText.trim() === '{}') {
-        console.warn(`[ocr] Gemini ${modelName} が空応答を返却。次のモデルへフォールバック`);
-        lastError = new Error(`empty response from ${modelName}`);
-        continue;
+  // パス2: ラベル単独行 → 次行を値とみなす
+  for (let i = 0; i < lines.length; i++) {
+    const current = lines[i];
+    const next = lines[i + 1];
+    if (!next) continue;
+    for (const { keys, field } of labelMap) {
+      if (keys.test(current) && !(field in fields)) {
+        setField(fields, field, next, overallConfidence * 0.9);
+        break;
       }
+    }
+  }
 
-      const parsed = tryParseJson(responseText);
-      if (parsed && Object.keys(parsed).length > 0) {
-        console.log(
-          `[ocr] Gemini ${modelName} 解析成功。フィールド数: ${Object.keys(parsed).length}`
-        );
-        return parsed as OcrExtractedFields;
-      }
-      console.warn(
-        `[ocr] Gemini ${modelName} の応答をパースしたが空オブジェクト。次のモデルへフォールバック`
-      );
-      lastError = new Error(`parsed but empty from ${modelName}: ${responseText.substring(0, 100)}`);
-    } catch (err: any) {
-      lastError = err;
-      console.warn(
-        `[ocr] Gemini ${modelName} 呼び出し失敗。次の候補にフォールバック:`,
-        err?.message || err
+  // 郵便番号は 7桁数字の個別サーチも（「〒123-4567」等）
+  if (!fields.postal_code) {
+    const zipMatch = rawText.match(/〒?\s*(\d{3})\s*[-ー]?\s*(\d{4})/);
+    if (zipMatch) {
+      setField(
+        fields,
+        'postal_code',
+        `${zipMatch[1]}${zipMatch[2]}`,
+        overallConfidence * 0.85
       );
     }
   }
 
-  console.error('[ocr] 全Geminiモデル候補で失敗:', lastError);
-  return {};
-}
-
-/**
- * Gemini からの応答をできるだけ寛容にJSONとしてパースする。
- * - 純粋なJSON
- * - ```json ... ``` のコードブロック包み
- * - 余計な前置きテキスト + JSON 本体
- * のいずれでも拾えるようにする。
- */
-function tryParseJson(text: string): Record<string, any> | null {
-  if (!text) return null;
-
-  // 1) そのままパース
-  try {
-    return JSON.parse(text);
-  } catch {
-    // continue
-  }
-
-  // 2) コードブロックを剥がしてパース
-  const stripped = text
-    .replace(/^\s*```(?:json)?\s*/i, '')
-    .replace(/\s*```\s*$/i, '')
-    .trim();
-  try {
-    return JSON.parse(stripped);
-  } catch {
-    // continue
-  }
-
-  // 3) 最初の { から対応する } までを抽出してパース
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    const candidate = text.slice(firstBrace, lastBrace + 1);
-    try {
-      return JSON.parse(candidate);
-    } catch {
-      // continue
+  // 郵便番号の正規化（ハイフン・空白除去、数字変換）
+  if (fields.postal_code) {
+    const zip = normalizeNumbers(fields.postal_code.value).replace(/[^0-9]/g, '');
+    if (zip.length === 7) {
+      fields.postal_code.value = zip;
+    } else {
+      fields.postal_code.confidence = Math.min(
+        fields.postal_code.confidence,
+        0.5
+      );
     }
   }
 
+  // 氏名未検出なら、テキスト最上位の短い行を候補に（ラベル除く）
+  if (!fields.full_name) {
+    const cand = lines.find(
+      (l) =>
+        l.length <= 12 &&
+        /[\u4e00-\u9fafぁ-んァ-ヶ々]/.test(l) &&
+        !/[:：\d〒]/.test(l)
+    );
+    if (cand) {
+      setField(fields, 'full_name', cand, 0.4); // 推測なので低信頼度
+    }
+  }
+
+  return fields;
+}
+
+function normalizeLabel(label: string): keyof OcrExtractedFields | null {
+  if (/氏名|お名前|御芳名|ご芳名|名前|姓名/.test(label)) return 'full_name';
+  if (/ふりがな|フリガナ|振仮名/.test(label)) return 'furigana';
+  if (/郵便番号|〒|ゆうびん番号/.test(label)) return 'postal_code';
+  if (/住所|ご住所|お住まい|現住所/.test(label)) return 'address';
+  if (/関係|ご関係|故人との関係/.test(label)) return 'relation';
   return null;
 }
 
+function setField(
+  fields: OcrExtractedFields,
+  field: keyof OcrExtractedFields,
+  value: string,
+  confidence: number
+) {
+  const cleaned = value.replace(/[\s\u3000]+$/, '').trim();
+  if (!cleaned) return;
+  if (fields[field] && (fields[field]!.value?.length ?? 0) >= cleaned.length) return;
+  fields[field] = {
+    value: cleaned,
+    confidence: Math.min(Math.max(confidence, 0), 1),
+  };
+}
+
 /**
- * 全体の信頼度を計算（最低値を採用 — 一つでも低ければ全体が低い扱い）
+ * 全角数字→半角数字
+ */
+function normalizeNumbers(s: string): string {
+  return s.replace(/[０-９]/g, (ch) =>
+    String.fromCharCode(ch.charCodeAt(0) - 0xfee0)
+  );
+}
+
+/**
+ * 全体の信頼度を計算（必須フィールドの最低値）
  */
 function calcOverallConfidence(ex: OcrExtractedFields): number {
   const vals: number[] = [];
-  // 必須フィールドのみ評価対象（relation/furiganaは欠落しても受付は可能なので除外）
   if (ex.full_name?.confidence != null) vals.push(ex.full_name.confidence);
   if (ex.address?.confidence != null && ex.address.value) {
     vals.push(ex.address.confidence);
@@ -284,63 +229,46 @@ function calcOverallConfidence(ex: OcrExtractedFields): number {
 }
 
 /**
- * MIMEタイプを画像バッファから推定（先頭バイトでざっくり判定）
- */
-function detectMimeType(buf: Buffer): string {
-  if (buf.length >= 4) {
-    if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
-    if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
-      return 'image/png';
-    }
-    if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return 'image/gif';
-    if (buf.length >= 12 && buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP') {
-      return 'image/webp';
-    }
-    // HEIC: ftyp box
-    if (buf.length >= 12 && buf.slice(4, 8).toString() === 'ftyp') {
-      const brand = buf.slice(8, 12).toString();
-      if (['heic', 'heix', 'mif1'].includes(brand)) return 'image/heic';
-    }
-  }
-  return 'image/jpeg'; // デフォルト
-}
-
-/**
- * 画像1枚をOCR → 構造化まで実行
+ * 画像1枚をOCR → 構造化まで実行（Vision単独、Gemini不使用）
  */
 export async function processOcr(
   imageBuffer: Buffer,
-  mimeTypeHint?: string
+  // 互換性のため残すが未使用
+  _mimeTypeHint?: string
 ): Promise<OcrResult> {
-  const mimeType =
-    mimeTypeHint && mimeTypeHint.startsWith('image/')
-      ? mimeTypeHint
-      : detectMimeType(imageBuffer);
+  const started = Date.now();
 
-  // ① Vision OCR（テキスト化）
-  let rawText = '';
-  let visionConf = 0;
-  try {
-    const visionResult = await runVisionOcr(imageBuffer);
-    rawText = visionResult.text;
-    visionConf = visionResult.avgConfidence;
-  } catch (err) {
-    // Vision がエラーでも Gemini に画像を渡せば抽出できる可能性があるので続行
-    console.warn('Vision OCR失敗、Geminiの画像読み取り単独で続行:', err);
+  const { text: rawText, avgConfidence: visionConf } = await runVisionOcr(
+    imageBuffer
+  );
+  const visionMs = Date.now() - started;
+  console.log(
+    `[ocr] Vision 完了 ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}`
+  );
+
+  if (!rawText.trim()) {
+    return {
+      raw_text: '',
+      extracted: {},
+      overall_confidence: 0,
+      needs_review: true,
+    };
   }
 
-  // ② Gemini で画像 + テキストから構造化
-  const extracted = await runGeminiExtraction(rawText, imageBuffer, mimeType);
+  const extracted = parseAttendeeFields(rawText, visionConf);
+  console.log(
+    `[ocr] キーワード解析完了 抽出件数=${Object.keys(extracted).length}`
+  );
 
-  // ③ 全体信頼度を判定
-  const geminiConf = calcOverallConfidence(extracted);
-  // Visionが完全失敗した場合は Vision の信頼度0で全体を引き下げないよう、Geminiの値のみ使う
-  const overall = visionConf > 0 ? Math.min(geminiConf, visionConf) : geminiConf;
+  const fieldConf = calcOverallConfidence(extracted);
+  // 抽出できなかった必須フィールドがあれば全体信頼度を下げる
+  const missingPenalty = !extracted.full_name ? 0.3 : 1.0;
+  const overall = Math.min(fieldConf * missingPenalty, visionConf);
 
   return {
     raw_text: rawText,
     extracted,
     overall_confidence: overall,
-    needs_review: overall < REVIEW_THRESHOLD,
+    needs_review: overall < REVIEW_THRESHOLD || !extracted.full_name,
   };
 }
