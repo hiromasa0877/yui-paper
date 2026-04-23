@@ -55,14 +55,13 @@ export async function preprocessForOcr(input: Buffer): Promise<PreprocessResult>
       })
       // カラー情報は手書きOCRに不要、むしろノイズになりがち
       .grayscale()
-      // ヒストグラム伸張: 最暗点→0, 最明点→255 にストレッチ
-      .normalize()
-      // 明度を少し下げてコントラストを少し上げる
-      //   linear(a, b) は出力 = a * 入力 + b
-      //   a=1.15 でコントラストUP、b=-15 で全体を少し暗く
-      .linear(1.15, -15)
-      // シャープネス。sigma が大きいほど強い（鉛筆書き対応）
-      .sharpen({ sigma: 1.2, m1: 1.0, m2: 2.0 })
+      // NOTE: normalize() は以前は入れていたが、ヒストグラム最大引き伸ばしで
+      //       薄い鉛筆線が白飛びして手書きが消えるケースが発生したため削除。
+      //       線の視認性は linear と sharpen で緩やかに底上げする。
+      // 軽いコントラスト強調（a=1.05 でわずかに傾き、b=-5 でごく軽く暗く）
+      .linear(1.05, -5)
+      // 軽めのシャープネス。sigma を小さくして自然な線の復活にとどめる
+      .sharpen({ sigma: 0.8, m1: 0.5, m2: 1.5 })
       // JPEG再エンコード。quality 90 は文字のエッジを残す十分な値
       .jpeg({ quality: 90, progressive: true, mozjpeg: false });
 

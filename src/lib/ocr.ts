@@ -327,18 +327,41 @@ export async function processOcr(
   // ② Vision OCR と Gemini チェックボックス検出を並列実行
   //    Gemini は関係/供え物チェック欄のみ判定する軽量プロンプトを使うため高速。
   const visionStarted = Date.now();
-  const [visionResult, checkboxes] = await Promise.all([
+  let [visionResult, checkboxes] = await Promise.all([
     runVisionOcr(pre.buffer),
     detectCheckboxes(pre.buffer, pre.mimeType).catch((e) => {
       console.warn('[ocr] チェックボックス検出失敗:', e);
       return {} as Awaited<ReturnType<typeof detectCheckboxes>>;
     }),
   ]);
-  const { text: rawText, avgConfidence: visionConf } = visionResult;
+  let { text: rawText, avgConfidence: visionConf } = visionResult;
   const visionMs = Date.now() - visionStarted;
   console.log(
     `[ocr] 前処理 ${preprocessMs}ms + Vision+Gemini並列 ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}, 前処理適用=${pre.appliedPreprocess}`
   );
+
+  // ③ 前処理でVisionが極端に少ない文字しか返さなかった場合、元画像で再試行
+  //    （前処理が逆効果になっているケースを救済する安全網）
+  if (pre.appliedPreprocess && rawText.length < 30) {
+    console.log(
+      `[ocr] 前処理後Vision出力が${rawText.length}文字と少ないため元画像で再試行`
+    );
+    try {
+      const retryStarted = Date.now();
+      const retry = await runVisionOcr(imageBuffer);
+      console.log(
+        `[ocr] 元画像Vision再試行 ${Date.now() - retryStarted}ms, 文字数=${retry.text.length}`
+      );
+      // 元画像の方が明らかに情報量多ければそちらを採用
+      if (retry.text.length > rawText.length) {
+        rawText = retry.text;
+        visionConf = retry.avgConfidence;
+        console.log('[ocr] 元画像の結果を採用');
+      }
+    } catch (err) {
+      console.warn('[ocr] 元画像再試行エラー（前処理版を継続使用）:', err);
+    }
+  }
 
   if (!rawText.trim()) {
     return {
