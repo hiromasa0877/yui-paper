@@ -15,6 +15,7 @@
  */
 
 import { ImageAnnotatorClient } from '@google-cloud/vision';
+import { preprocessForOcr } from './image-preprocess';
 
 export type OcrExtractedFields = {
   full_name?: { value: string; confidence: number };
@@ -102,29 +103,54 @@ function parseAttendeeFields(
     { keys: /^(氏名|お名前|御芳名|ご芳名|名前|姓名)[:：]?$/, field: 'full_name' },
     { keys: /^(ふりがな|フリガナ|ふりがな|振仮名)[:：]?$/, field: 'furigana' },
     { keys: /^(郵便番号|〒|ゆうびん番号)[:：]?$/, field: 'postal_code' },
-    { keys: /^(住所|ご住所|お住まい|現住所)[:：]?$/, field: 'address' },
-    { keys: /^(電話|電話番号|連絡先|TEL|Tel|tel)[:：]?$/, field: 'relation' }, // 電話は使い道なし
+    { keys: /^(住所|ご住所|お住まい|現住所|自宅住所)[:：]?$/, field: 'address' },
     { keys: /^(関係|ご関係|故人との関係)[:：]?$/, field: 'relation' },
   ];
 
   const fields: OcrExtractedFields = {};
+  // 姓・名 が別々に書かれる芳名カード向けの一時バッファ
+  let surname: string | null = null;
+  let givenName: string | null = null;
 
   // パス1: 1行に「ラベル: 値」形式
-  const inline: Array<{ field: keyof OcrExtractedFields; value: string }> = [];
+  const inline: Array<{ field: keyof OcrExtractedFields | 'surname' | 'given_name'; value: string }> = [];
   for (const line of lines) {
-    // 「氏名: 荻野寛真」「住所：埼玉県…」形式
+    // 「姓: 荻野」「名: 寛真」形式を先に拾う（短い方から評価）
+    const sm = line.match(/^(姓|名字|苗字)\s*[:：]\s*(.+)$/);
+    if (sm) {
+      inline.push({ field: 'surname', value: sm[2].trim() });
+      continue;
+    }
+    const gm = line.match(/^(名|下の名前|下名|名前$)\s*[:：]\s*(.+)$/);
+    if (gm) {
+      inline.push({ field: 'given_name', value: gm[2].trim() });
+      continue;
+    }
+    // 一般ラベル「氏名: 荻野寛真」「住所：埼玉県…」形式
     const m = line.match(
-      /^(氏名|お名前|御芳名|ご芳名|名前|姓名|ふりがな|フリガナ|振仮名|郵便番号|〒|住所|ご住所|お住まい|現住所|電話|電話番号|連絡先|関係|ご関係|故人との関係)\s*[:：]\s*(.+)$/
+      /^(氏名|お名前|御芳名|ご芳名|名前|姓名|ふりがな|フリガナ|振仮名|郵便番号|〒|住所|ご住所|お住まい|現住所|自宅住所|関係|ご関係|故人との関係)\s*[:：]\s*(.+)$/
     );
     if (m) {
-      const labelRaw = m[1];
+      const label = normalizeLabel(m[1]);
       const value = m[2].trim();
-      const label = normalizeLabel(labelRaw);
       if (label && value) inline.push({ field: label, value });
     }
   }
   for (const { field, value } of inline) {
-    setField(fields, field, value, overallConfidence);
+    if (field === 'surname') {
+      surname = value;
+    } else if (field === 'given_name') {
+      givenName = value;
+    } else {
+      setField(fields, field, value, overallConfidence);
+    }
+  }
+
+  // 姓と名が両方あれば結合して full_name に
+  if (surname && givenName) {
+    setField(fields, 'full_name', `${surname} ${givenName}`, overallConfidence);
+  } else if (surname && !fields.full_name) {
+    setField(fields, 'full_name', surname, overallConfidence * 0.6);
   }
 
   // パス2: ラベル単独行 → 次行を値とみなす
@@ -137,6 +163,14 @@ function parseAttendeeFields(
         setField(fields, field, next, overallConfidence * 0.9);
         break;
       }
+    }
+  }
+
+  // 氏名が 1-2 文字だけの場合は信頼度を下げて要確認に振る
+  if (fields.full_name) {
+    const len = fields.full_name.value.replace(/\s/g, '').length;
+    if (len <= 2) {
+      fields.full_name.confidence = Math.min(fields.full_name.confidence, 0.4);
     }
   }
 
@@ -230,6 +264,10 @@ function calcOverallConfidence(ex: OcrExtractedFields): number {
 
 /**
  * 画像1枚をOCR → 構造化まで実行（Vision単独、Gemini不使用）
+ *
+ * 1. sharp で画像前処理（コントラスト強調・シャープネス・グレースケール）
+ * 2. Vision API で全文テキスト抽出
+ * 3. キーワードマッチで構造化
  */
 export async function processOcr(
   imageBuffer: Buffer,
@@ -238,12 +276,18 @@ export async function processOcr(
 ): Promise<OcrResult> {
   const started = Date.now();
 
+  // ① 画像前処理（失敗しても元画像で続行）
+  const pre = await preprocessForOcr(imageBuffer);
+  const preprocessMs = Date.now() - started;
+
+  // ② Vision OCR
+  const visionStarted = Date.now();
   const { text: rawText, avgConfidence: visionConf } = await runVisionOcr(
-    imageBuffer
+    pre.buffer
   );
-  const visionMs = Date.now() - started;
+  const visionMs = Date.now() - visionStarted;
   console.log(
-    `[ocr] Vision 完了 ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}`
+    `[ocr] 前処理 ${preprocessMs}ms + Vision ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}, 前処理適用=${pre.appliedPreprocess}`
   );
 
   if (!rawText.trim()) {
