@@ -16,13 +16,20 @@
 
 import { ImageAnnotatorClient } from '@google-cloud/vision';
 import { preprocessForOcr } from './image-preprocess';
+import { detectCheckboxes, relationKeyToJa } from './gemini-checkboxes';
 
 export type OcrExtractedFields = {
   full_name?: { value: string; confidence: number };
   furigana?: { value: string; confidence: number };
   postal_code?: { value: string; confidence: number };
   address?: { value: string; confidence: number };
+  phone?: { value: string; confidence: number };
   relation?: { value: string; confidence: number };
+  // チェックボックス系（Geminiで検出）
+  has_kuge?: { value: boolean; confidence: number };
+  has_kumotsu?: { value: boolean; confidence: number };
+  has_chouden?: { value: boolean; confidence: number };
+  has_other_offering?: { value: boolean; confidence: number };
 };
 
 export type OcrResult = {
@@ -98,7 +105,7 @@ function parseAttendeeFields(
   // ラベル正規化マップ
   const labelMap: Array<{
     keys: RegExp;
-    field: keyof OcrExtractedFields;
+    field: TextFieldKey;
   }> = [
     { keys: /^(氏名|お名前|御芳名|ご芳名|名前|姓名)[:：]?$/, field: 'full_name' },
     { keys: /^(ふりがな|フリガナ|ふりがな|振仮名)[:：]?$/, field: 'furigana' },
@@ -113,7 +120,7 @@ function parseAttendeeFields(
   let givenName: string | null = null;
 
   // パス1: 1行に「ラベル: 値」形式
-  const inline: Array<{ field: keyof OcrExtractedFields | 'surname' | 'given_name'; value: string }> = [];
+  const inline: Array<{ field: TextFieldKey | 'surname' | 'given_name'; value: string }> = [];
   for (const line of lines) {
     // 「姓: 荻野」「名: 寛真」形式を先に拾う（短い方から評価）
     const sm = line.match(/^(姓|名字|苗字)\s*[:：]\s*(.+)$/);
@@ -174,6 +181,39 @@ function parseAttendeeFields(
     }
   }
 
+  // 電話番号を正規表現で抽出（ラベルに依存しない全文検索）
+  // 日本の電話番号パターン: 0X-XXXX-XXXX / 0XX-XXXX-XXXX / 0XXX-XX-XXXX /
+  //                         携帯 090-XXXX-XXXX / 080-XXXX-XXXX / 070-XXXX-XXXX
+  // 全角数字・括弧・全角ハイフンも吸収
+  if (!fields.phone) {
+    const normalized = normalizeNumbers(rawText)
+      .replace(/[（(]/g, '-')
+      .replace(/[）)]/g, '-')
+      .replace(/[ー−–—]/g, '-');
+    const phonePatterns = [
+      /(0\d{1,4})-?(\d{1,4})-?(\d{3,4})/g, // 一般・フリーダイヤル
+    ];
+    for (const pat of phonePatterns) {
+      const matches = Array.from(normalized.matchAll(pat));
+      for (const m of matches) {
+        const digits = (m[1] + m[2] + m[3]).replace(/[^0-9]/g, '');
+        // 10桁（固定電話）か11桁（携帯）を採用
+        if (digits.length === 10 || digits.length === 11) {
+          // 郵便番号7桁と混同しないように、〒プレフィックスや7桁単独は除外
+          const context = rawText.slice(
+            Math.max(0, rawText.indexOf(m[0]) - 5),
+            rawText.indexOf(m[0])
+          );
+          if (!/〒|郵便/.test(context)) {
+            setField(fields, 'phone', `${m[1]}-${m[2]}-${m[3]}`, overallConfidence * 0.85);
+            break;
+          }
+        }
+      }
+      if (fields.phone) break;
+    }
+  }
+
   // 郵便番号は 7桁数字の個別サーチも（「〒123-4567」等）
   if (!fields.postal_code) {
     const zipMatch = rawText.match(/〒?\s*(\d{3})\s*[-ー]?\s*(\d{4})/);
@@ -216,24 +256,28 @@ function parseAttendeeFields(
   return fields;
 }
 
-function normalizeLabel(label: string): keyof OcrExtractedFields | null {
+function normalizeLabel(label: string): TextFieldKey | null {
   if (/氏名|お名前|御芳名|ご芳名|名前|姓名/.test(label)) return 'full_name';
   if (/ふりがな|フリガナ|振仮名/.test(label)) return 'furigana';
   if (/郵便番号|〒|ゆうびん番号/.test(label)) return 'postal_code';
-  if (/住所|ご住所|お住まい|現住所/.test(label)) return 'address';
+  if (/住所|ご住所|お住まい|現住所|自宅住所/.test(label)) return 'address';
   if (/関係|ご関係|故人との関係/.test(label)) return 'relation';
   return null;
 }
 
+// テキストフィールドのみ（チェックボックスのbooleanフィールドは別扱い）
+type TextFieldKey = 'full_name' | 'furigana' | 'postal_code' | 'address' | 'phone' | 'relation';
+
 function setField(
   fields: OcrExtractedFields,
-  field: keyof OcrExtractedFields,
+  field: TextFieldKey,
   value: string,
   confidence: number
 ) {
   const cleaned = value.replace(/[\s\u3000]+$/, '').trim();
   if (!cleaned) return;
-  if (fields[field] && (fields[field]!.value?.length ?? 0) >= cleaned.length) return;
+  const existing = fields[field];
+  if (existing && (existing.value?.length ?? 0) >= cleaned.length) return;
   fields[field] = {
     value: cleaned,
     confidence: Math.min(Math.max(confidence, 0), 1),
@@ -280,14 +324,20 @@ export async function processOcr(
   const pre = await preprocessForOcr(imageBuffer);
   const preprocessMs = Date.now() - started;
 
-  // ② Vision OCR
+  // ② Vision OCR と Gemini チェックボックス検出を並列実行
+  //    Gemini は関係/供え物チェック欄のみ判定する軽量プロンプトを使うため高速。
   const visionStarted = Date.now();
-  const { text: rawText, avgConfidence: visionConf } = await runVisionOcr(
-    pre.buffer
-  );
+  const [visionResult, checkboxes] = await Promise.all([
+    runVisionOcr(pre.buffer),
+    detectCheckboxes(pre.buffer, pre.mimeType).catch((e) => {
+      console.warn('[ocr] チェックボックス検出失敗:', e);
+      return {} as Awaited<ReturnType<typeof detectCheckboxes>>;
+    }),
+  ]);
+  const { text: rawText, avgConfidence: visionConf } = visionResult;
   const visionMs = Date.now() - visionStarted;
   console.log(
-    `[ocr] 前処理 ${preprocessMs}ms + Vision ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}, 前処理適用=${pre.appliedPreprocess}`
+    `[ocr] 前処理 ${preprocessMs}ms + Vision+Gemini並列 ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}, 前処理適用=${pre.appliedPreprocess}`
   );
 
   if (!rawText.trim()) {
@@ -303,6 +353,36 @@ export async function processOcr(
   console.log(
     `[ocr] キーワード解析完了 抽出件数=${Object.keys(extracted).length}`
   );
+
+  // ③ Gemini チェックボックス結果をマージ
+  //    Gemini が検出した関係を parser の relation に優先で上書き
+  //    （Visionでラベル位置に無く、チェックボックス塗りで表現される芳名カード向け）
+  if (checkboxes.relation) {
+    const relJa = relationKeyToJa(checkboxes.relation);
+    if (relJa) {
+      extracted.relation = {
+        value: relJa,
+        confidence: checkboxes.confidence ?? 0.75,
+      };
+    }
+  }
+  // 供え物フラグはboolean値で格納
+  const cbConf = checkboxes.confidence ?? 0.7;
+  if (checkboxes.has_kuge !== undefined) {
+    extracted.has_kuge = { value: checkboxes.has_kuge, confidence: cbConf };
+  }
+  if (checkboxes.has_kumotsu !== undefined) {
+    extracted.has_kumotsu = { value: checkboxes.has_kumotsu, confidence: cbConf };
+  }
+  if (checkboxes.has_chouden !== undefined) {
+    extracted.has_chouden = { value: checkboxes.has_chouden, confidence: cbConf };
+  }
+  if (checkboxes.has_other_offering !== undefined) {
+    extracted.has_other_offering = {
+      value: checkboxes.has_other_offering,
+      confidence: cbConf,
+    };
+  }
 
   const fieldConf = calcOverallConfidence(extracted);
   // 抽出できなかった必須フィールドがあれば全体信頼度を下げる

@@ -155,11 +155,17 @@ export async function POST(req: NextRequest) {
       full_name: ex.full_name?.value || '(要確認)',
       postal_code: ex.postal_code?.value || null,
       address: ex.address?.value || null,
+      phone: ex.phone?.value || null,
       relation: ex.relation?.value || null,
     };
     if (ex.furigana?.value) {
       updatePayload.furigana = ex.furigana.value;
     }
+    // Geminiチェックボックス検出結果（true の時だけ上書き、未検出は既存値を維持）
+    if (ex.has_kuge?.value === true) updatePayload.has_kuge = true;
+    if (ex.has_kumotsu?.value === true) updatePayload.has_kumotsu = true;
+    if (ex.has_chouden?.value === true) updatePayload.has_chouden = true;
+    if (ex.has_other_offering?.value === true) updatePayload.has_other_offering = true;
 
     const { error: updateError } = await supabase
       .from('attendees')
