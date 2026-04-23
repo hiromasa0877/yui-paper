@@ -16,7 +16,7 @@
 
 import { ImageAnnotatorClient } from '@google-cloud/vision';
 import { preprocessForOcr } from './image-preprocess';
-import { detectCheckboxes, relationKeyToJa } from './gemini-checkboxes';
+import { analyzeFullCard, relationKeyToJa } from './gemini-full-card';
 
 export type OcrExtractedFields = {
   full_name?: { value: string; confidence: number };
@@ -324,20 +324,20 @@ export async function processOcr(
   const pre = await preprocessForOcr(imageBuffer);
   const preprocessMs = Date.now() - started;
 
-  // ② Vision OCR と Gemini チェックボックス検出を並列実行
-  //    Gemini は関係/供え物チェック欄のみ判定する軽量プロンプトを使うため高速。
+  // ② Vision OCR（raw_text用）と Gemini フル解析（主抽出）を並列実行
+  //    Gemini が主で、Vision は監査用+フォールバック用
   const visionStarted = Date.now();
-  let [visionResult, checkboxes] = await Promise.all([
+  const [visionResult, fullCard] = await Promise.all([
     runVisionOcr(pre.buffer),
-    detectCheckboxes(pre.buffer, pre.mimeType).catch((e) => {
-      console.warn('[ocr] チェックボックス検出失敗:', e);
-      return {} as Awaited<ReturnType<typeof detectCheckboxes>>;
+    analyzeFullCard(pre.buffer, pre.mimeType).catch((e) => {
+      console.warn('[ocr] Geminiフル解析失敗:', e);
+      return {} as Awaited<ReturnType<typeof analyzeFullCard>>;
     }),
   ]);
   let { text: rawText, avgConfidence: visionConf } = visionResult;
   const visionMs = Date.now() - visionStarted;
   console.log(
-    `[ocr] 前処理 ${preprocessMs}ms + Vision+Gemini並列 ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}, 前処理適用=${pre.appliedPreprocess}`
+    `[ocr] 前処理 ${preprocessMs}ms + Vision+Gemini並列 ${visionMs}ms, 文字数=${rawText.length}, avgConfidence=${visionConf.toFixed(2)}, 前処理適用=${pre.appliedPreprocess}, Gemini取得キー=${Object.keys(fullCard).length}`
   );
 
   // ③ 前処理でVisionが極端に少ない文字しか返さなかった場合、元画像で再試行
@@ -372,37 +372,55 @@ export async function processOcr(
     };
   }
 
+  // ③ Vision + キーワード解析（フォールバック用）
   const extracted = parseAttendeeFields(rawText, visionConf);
   console.log(
-    `[ocr] キーワード解析完了 抽出件数=${Object.keys(extracted).length}`
+    `[ocr] Visionキーワード解析 抽出件数=${Object.keys(extracted).length}`
   );
 
-  // ③ Gemini チェックボックス結果をマージ
-  //    Gemini が検出した関係を parser の relation に優先で上書き
-  //    （Visionでラベル位置に無く、チェックボックス塗りで表現される芳名カード向け）
-  if (checkboxes.relation) {
-    const relJa = relationKeyToJa(checkboxes.relation);
+  // ④ Gemini フル解析の結果を優先でマージ
+  //    Gemini が値を返していればそれを採用、空の場合だけ Vision パーサ値を維持
+  const gConf = fullCard.confidence ?? {};
+  const mergeField = (
+    field: 'full_name' | 'postal_code' | 'address' | 'phone' | 'furigana',
+    value: string | null | undefined,
+    conf: number
+  ) => {
+    if (value) {
+      extracted[field] = { value, confidence: conf };
+    }
+  };
+  mergeField('full_name', fullCard.full_name, gConf.full_name ?? 0.8);
+  mergeField('furigana', fullCard.furigana, 0.7);
+  mergeField('postal_code', fullCard.postal_code, 0.9);
+  mergeField('address', fullCard.address, gConf.address ?? 0.8);
+  mergeField('phone', fullCard.phone, gConf.phone ?? 0.8);
+
+  // 関係
+  if (fullCard.relation) {
+    const relJa = relationKeyToJa(fullCard.relation);
     if (relJa) {
       extracted.relation = {
         value: relJa,
-        confidence: checkboxes.confidence ?? 0.75,
+        confidence: gConf.relation ?? 0.8,
       };
     }
   }
-  // 供え物フラグはboolean値で格納
-  const cbConf = checkboxes.confidence ?? 0.7;
-  if (checkboxes.has_kuge !== undefined) {
-    extracted.has_kuge = { value: checkboxes.has_kuge, confidence: cbConf };
+
+  // 供え物チェックボックス
+  const cbConf = 0.75;
+  if (typeof fullCard.has_kuge === 'boolean') {
+    extracted.has_kuge = { value: fullCard.has_kuge, confidence: cbConf };
   }
-  if (checkboxes.has_kumotsu !== undefined) {
-    extracted.has_kumotsu = { value: checkboxes.has_kumotsu, confidence: cbConf };
+  if (typeof fullCard.has_kumotsu === 'boolean') {
+    extracted.has_kumotsu = { value: fullCard.has_kumotsu, confidence: cbConf };
   }
-  if (checkboxes.has_chouden !== undefined) {
-    extracted.has_chouden = { value: checkboxes.has_chouden, confidence: cbConf };
+  if (typeof fullCard.has_chouden === 'boolean') {
+    extracted.has_chouden = { value: fullCard.has_chouden, confidence: cbConf };
   }
-  if (checkboxes.has_other_offering !== undefined) {
+  if (typeof fullCard.has_other_offering === 'boolean') {
     extracted.has_other_offering = {
-      value: checkboxes.has_other_offering,
+      value: fullCard.has_other_offering,
       confidence: cbConf,
     };
   }
