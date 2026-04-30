@@ -92,15 +92,22 @@ function getClient(): GoogleGenerativeAI | null {
   return client;
 }
 
-// Generative Language API v1beta で確実に動くモデル名（latestエイリアス + 安定版）
-// "gemini-2.0-flash" や "gemini-1.5-flash" は API バージョンによっては 404 になるため使わない
+// 2026年4月現在、新規発行された API キーで v1beta:generateContent に通るのは
+// gemini-2.5 系（思考モード付き）と gemini-flash-latest (= 最新Flashへのエイリアス)。
+// gemini-1.5-* / gemini-2.0-flash は ListModels に出ても "no longer available to new users" で 404。
+// gemini-2.0-flash-exp は API バージョン v1beta では解決されず 404。
+// よって候補リストはここに挙げた現役モデルだけに絞る。
 const MODEL_CANDIDATES = [
   process.env.GEMINI_MODEL,
-  'gemini-2.0-flash-exp',
-  'gemini-1.5-flash-latest',
-  'gemini-1.5-flash-002',
-  'gemini-1.5-flash',
+  'gemini-2.5-flash', // 第一候補（思考モード対応・安定版）
+  'gemini-flash-latest', // フォールバック1（最新Flashへの自動追従）
+  'gemini-2.5-flash-lite', // フォールバック2（より軽量・思考モード）
 ].filter((m): m is string => !!m && m.length > 0);
+
+// 思考モード付きモデルは内部推論に出力トークンを消費するため、
+// 800 トークンだと JSON 本体が空になる事故が起きる。
+// 構造化抽出は数百〜千トークン、思考に1000〜2000を見込んで合計4000確保する。
+const MAX_OUTPUT_TOKENS = 4000;
 
 /**
  * Gemini 入力用に画像を 1600px 以下に縮小して JPEG 化。
@@ -199,7 +206,11 @@ export async function analyzeFullCard(
         generationConfig: {
           responseMimeType: 'application/json',
           temperature: 0.0,
-          maxOutputTokens: 800,
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+          // SDK 0.21.0 の型には載っていないが、API レベルでは思考予算ゼロで
+          // 即答モードを要求できる。思考モデルは黙認、非思考モデルは無視されるので両対応。
+          // 注: 厳密に型を満たさないので as any で渡す。
+          ...({ thinkingConfig: { thinkingBudget: 0 } } as any),
         },
       });
       const started = Date.now();

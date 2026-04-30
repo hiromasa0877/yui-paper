@@ -71,6 +71,61 @@ function getSupabaseAdmin() {
   });
 }
 
+/**
+ * OCR 劣化検知アラート。
+ *
+ * Gemini が全モデル失敗 + Vision OCR からも氏名が拾えない、というシステム劣化状態を
+ * 静かに見逃すと「現場では精度が下がっただけ」に見えて気付きが遅れる。
+ *
+ * 検知条件:
+ *   - ocr_status が success 以外（review_needed / failed）
+ *   - かつ full_name が空 or "(要確認)"
+ *   - かつ overall_confidence が 0.4 未満
+ *  この 3 つが揃った時のみ「真に Gemini が死んでいる可能性」として通知する。
+ *
+ * 通知先:
+ *   - SLACK_ALERT_WEBHOOK_URL が設定されていれば Slack Incoming Webhook へ POST
+ *   - 未設定時は console.error にだけ出力（ログ調査で気づける）
+ *
+ * 通知失敗で OCR フローを止めないよう例外は握りつぶす。
+ */
+async function alertOcrDegradation(args: {
+  attendeeId: string;
+  ocrStatus: string;
+  overallConfidence: number;
+  fullName: string | null;
+  rawTextLength: number;
+}): Promise<void> {
+  const { attendeeId, ocrStatus, overallConfidence, fullName, rawTextLength } = args;
+  // 検知条件
+  const noName = !fullName || fullName === '(要確認)' || fullName === '(受付中)' || fullName.trim().length === 0;
+  const lowConf = overallConfidence < 0.4;
+  const failed = ocrStatus !== 'success';
+  if (!(noName && lowConf && failed)) return;
+
+  const summary = `[yui-paper] OCR劣化検知: attendee=${attendeeId} status=${ocrStatus} conf=${overallConfidence.toFixed(2)} name="${fullName ?? ''}" rawLen=${rawTextLength}. Geminiが全モデル失敗してVision側も氏名を取れていない可能性。Vercel Logs で [full-card] を確認してください。`;
+  console.error(summary);
+
+  const webhook = process.env.SLACK_ALERT_WEBHOOK_URL;
+  if (!webhook) {
+    // Webhook 未設定時はログのみで終了（best effort）
+    return;
+  }
+
+  try {
+    const res = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: summary }),
+    });
+    if (!res.ok) {
+      console.warn(`[alert] Slack webhook 応答 ${res.status}（無視して続行）`);
+    }
+  } catch (e) {
+    console.warn('[alert] Slack webhook 送信失敗（無視して続行）:', e);
+  }
+}
+
 export async function POST(req: NextRequest) {
   let attendeeId: string | null = null;
   try {
@@ -179,6 +234,16 @@ export async function POST(req: NextRequest) {
         { status: 500 }
       );
     }
+
+    // OCR 劣化検知（Gemini 全失敗 + Vision でも氏名取れず）。
+    // 通知は非同期 fire-and-forget でレスポンスを遅らせない。
+    void alertOcrDegradation({
+      attendeeId,
+      ocrStatus: String(updatePayload.ocr_status),
+      overallConfidence: ocrResult.overall_confidence ?? 0,
+      fullName: ex.full_name?.value ?? null,
+      rawTextLength: ocrResult.raw_text?.length ?? 0,
+    });
 
     return NextResponse.json({
       ok: true,
