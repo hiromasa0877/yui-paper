@@ -91,6 +91,7 @@ export default function AttendeeTable({
             <th className="px-3 py-3 text-left font-semibold">管理番号</th>
             <th className="px-3 py-3 text-left font-semibold">氏名</th>
             <th className="px-3 py-3 text-left font-semibold">住所</th>
+            <th className="px-3 py-3 text-left font-semibold">電話</th>
             <th className="px-3 py-3 text-left font-semibold">ご関係</th>
             <th className="px-3 py-3 text-right font-semibold">香典金額</th>
             <th className="px-3 py-3 text-center font-semibold">供花</th>
@@ -174,6 +175,20 @@ function AttendeeRow({
       </td>
       <td className="px-3 py-3 text-gray-600 text-xs">
         {attendee.address || attendee.postal_code || '-'}
+      </td>
+      <td className="px-3 py-3 text-gray-600 text-xs whitespace-nowrap">
+        {attendee.phone ? (
+          // 電話番号は tel: リンクにしておくと、現場で iPad/iPhone から
+          // タップですぐ発信できる。葬儀現場の連絡業務で地味に効く。
+          <a
+            href={`tel:${attendee.phone.replace(/[^\d+]/g, '')}`}
+            className="hover:underline text-accent-teal"
+          >
+            {attendee.phone}
+          </a>
+        ) : (
+          '-'
+        )}
       </td>
       <td className="px-3 py-3 text-gray-600">{attendee.relation || '-'}</td>
       <td className="px-3 py-3 text-right font-semibold text-accent-gold">

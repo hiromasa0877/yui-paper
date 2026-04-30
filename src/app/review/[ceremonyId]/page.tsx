@@ -36,6 +36,7 @@ export default function ReviewPage() {
   const [formFurigana, setFormFurigana] = useState('');
   const [formPostalCode, setFormPostalCode] = useState('');
   const [formAddress, setFormAddress] = useState('');
+  const [formPhone, setFormPhone] = useState('');
   const [formRelation, setFormRelation] = useState('');
 
   useEffect(() => {
@@ -74,6 +75,7 @@ export default function ReviewPage() {
     setFormName(item.full_name === '(要確認)' || item.full_name === '(受付中)' ? '' : item.full_name);
     setFormPostalCode(item.postal_code || '');
     setFormAddress(item.address || '');
+    setFormPhone(item.phone || '');
     setFormRelation(item.relation || '');
     // 007マイグレーション後は専用カラム、未適用環境向けに notes フォールバックも残す
     if (item.furigana) {
@@ -124,6 +126,7 @@ export default function ReviewPage() {
         full_name: formName.trim(),
         postal_code: formPostalCode.trim() || null,
         address: formAddress.trim() || null,
+        phone: formPhone.trim() || null,
         relation: formRelation || null,
         furigana: formFurigana.trim() || null,
         ocr_status: 'success',
@@ -177,7 +180,7 @@ export default function ReviewPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIdx, formName, formFurigana, formPostalCode, formAddress, formRelation, reviewItems]);
+  }, [currentIdx, formName, formFurigana, formPostalCode, formAddress, formPhone, formRelation, reviewItems]);
 
   return (
     <div className="min-h-screen bg-accent-cream">
@@ -276,6 +279,11 @@ export default function ReviewPage() {
                   value={formAddress}
                   onChange={setFormAddress}
                   multiline
+                />
+                <Field
+                  label="電話番号"
+                  value={formPhone}
+                  onChange={setFormPhone}
                 />
                 <div>
                   <label className="block text-sm font-semibold text-accent-dark mb-1">
