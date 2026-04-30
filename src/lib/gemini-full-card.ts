@@ -92,9 +92,13 @@ function getClient(): GoogleGenerativeAI | null {
   return client;
 }
 
+// Generative Language API v1beta で確実に動くモデル名（latestエイリアス + 安定版）
+// "gemini-2.0-flash" や "gemini-1.5-flash" は API バージョンによっては 404 になるため使わない
 const MODEL_CANDIDATES = [
   process.env.GEMINI_MODEL,
-  'gemini-2.0-flash',
+  'gemini-2.0-flash-exp',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash-002',
   'gemini-1.5-flash',
 ].filter((m): m is string => !!m && m.length > 0);
 
