@@ -20,6 +20,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { processOcr } from '@/lib/ocr';
+import { authorizeReceptionRequest } from '@/lib/reception-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -142,6 +143,32 @@ export async function POST(req: NextRequest) {
     }
 
     const supabase = getSupabaseAdmin();
+
+    // 認証: attendee_id から ceremony_id を逆引きし、その式典への書き込み権限があるか確認。
+    // ここを通さないと scan で書き込んだ後の OCR フェーズだけ任意の attendee_id を
+    // 指定して書き換えられてしまう。
+    const { data: attendeeRow } = await supabase
+      .from('attendees')
+      .select('ceremony_id')
+      .eq('id', attendeeId)
+      .maybeSingle();
+    if (!attendeeRow?.ceremony_id) {
+      return NextResponse.json(
+        { error: 'attendee not found' },
+        { status: 404 }
+      );
+    }
+    const auth = await authorizeReceptionRequest(
+      supabase,
+      req,
+      attendeeRow.ceremony_id
+    );
+    if (!auth.authorized) {
+      return NextResponse.json(
+        { error: 'Unauthorized: provide X-Reception-Token or Authorization: Bearer <jwt>' },
+        { status: 401 }
+      );
+    }
 
     // 状態を processing に更新（レビュー画面でも見える）
     await supabase

@@ -18,6 +18,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
+import { authorizeReceptionRequest } from '@/lib/reception-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -127,6 +128,18 @@ export async function POST(req: NextRequest) {
     }
 
     const supabase = getSupabaseAdmin();
+
+    // ⓪′ 認証: 受付トークン or Supabase JWT のどちらかが ceremony_id への
+    // 書き込み権限を持っていること。両方無ければ 401。
+    // これがないと service-role の API が ceremony_id を信頼してしまい、
+    // 第三者が任意の式典に書き込めてしまう。
+    const auth = await authorizeReceptionRequest(supabase, req, ceremonyId);
+    if (!auth.authorized) {
+      return NextResponse.json(
+        { error: 'Unauthorized: provide X-Reception-Token or Authorization: Bearer <jwt>' },
+        { status: 401 }
+      );
+    }
 
     // ⓪ client_ref 既存チェック（同じ撮影が再送された場合は同じ番号を返す）
     const existing = await findExistingByClientRef(supabase, clientRef);

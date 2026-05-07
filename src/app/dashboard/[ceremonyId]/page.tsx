@@ -39,6 +39,7 @@ export default function DashboardPage() {
   const [filterStatus, setFilterStatus] = useState<'all' | 'received' | 'unreceived'>(
     'all'
   );
+  const [issueModalOpen, setIssueModalOpen] = useState(false);
 
   useEffect(() => {
     fetchCeremony();
@@ -322,6 +323,13 @@ export default function DashboardPage() {
                   </span>
                 )}
               </Link>
+              <button
+                type="button"
+                onClick={() => setIssueModalOpen(true)}
+                className="px-4 py-2 bg-purple-600 text-white text-sm font-semibold rounded-lg hover:opacity-90"
+              >
+                📱 受付URL発行
+              </button>
             </div>
           </div>
         )}
@@ -476,6 +484,194 @@ export default function DashboardPage() {
           )}
         </div>
       </main>
+
+      {issueModalOpen && (
+        <IssueTokenModal
+          ceremonyId={ceremonyId}
+          ceremonyName={ceremony?.name ?? '式典'}
+          onClose={() => setIssueModalOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * 受付モード専用URLを発行するモーダル。
+ *
+ * 葬儀社オーナーがこのモーダルから「受付URL発行」を行うと、
+ * 受付スタッフが iPad で開くだけで該当式典だけスキャンできるトークンURL
+ * が発行される。発行後は URL コピー / QR コード表示 / メール共有 等の
+ * 配布手段を選べる（現状は URL コピーのみ実装）。
+ */
+function IssueTokenModal({
+  ceremonyId,
+  ceremonyName,
+  onClose,
+}: {
+  ceremonyId: string;
+  ceremonyName: string;
+  onClose: () => void;
+}) {
+  const [displayName, setDisplayName] = useState(`${ceremonyName} 受付`);
+  const [expiresOption, setExpiresOption] = useState<'1d' | '3d' | '7d' | 'none'>('3d');
+  const [issuing, setIssuing] = useState(false);
+  const [issuedUrl, setIssuedUrl] = useState<string | null>(null);
+
+  const computeExpiresAt = (): string | null => {
+    if (expiresOption === 'none') return null;
+    const days = expiresOption === '1d' ? 1 : expiresOption === '3d' ? 3 : 7;
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d.toISOString();
+  };
+
+  const handleIssue = async () => {
+    setIssuing(true);
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const jwt = sessionData?.session?.access_token;
+      if (!jwt) {
+        toast.error('ログインが必要です');
+        return;
+      }
+      const res = await fetch('/api/reception/issue-token', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${jwt}`,
+        },
+        body: JSON.stringify({
+          ceremony_id: ceremonyId,
+          display_name: displayName.trim() || '受付用URL',
+          expires_at: computeExpiresAt(),
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || `発行に失敗しました (HTTP ${res.status})`);
+      }
+      const json = await res.json();
+      const origin =
+        typeof window !== 'undefined' ? window.location.origin : '';
+      setIssuedUrl(`${origin}/r/${json.token}`);
+      toast.success('受付URLを発行しました');
+    } catch (e: any) {
+      toast.error(e?.message || '発行に失敗しました');
+    } finally {
+      setIssuing(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!issuedUrl) return;
+    try {
+      await navigator.clipboard.writeText(issuedUrl);
+      toast.success('URLをコピーしました');
+    } catch {
+      toast.error('クリップボードに書き込めませんでした');
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-md w-full p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-xl font-bold text-accent-dark mb-2">
+          受付URLを発行
+        </h2>
+        <p className="text-xs text-gray-600 mb-4 leading-relaxed">
+          発行したURLを開けば、その人はこの式典だけスキャンできます。
+          他の式典や参列者リストは見えません。
+        </p>
+
+        {!issuedUrl ? (
+          <>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-accent-dark mb-1">
+                  表示名（識別用メモ）
+                </label>
+                <input
+                  type="text"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="例: 山田次郎告別式・受付iPad1"
+                  maxLength={100}
+                  className="input-base"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-accent-dark mb-1">
+                  有効期限
+                </label>
+                <select
+                  value={expiresOption}
+                  onChange={(e) => setExpiresOption(e.target.value as any)}
+                  className="input-base"
+                >
+                  <option value="1d">1日後</option>
+                  <option value="3d">3日後（デフォルト）</option>
+                  <option value="7d">7日後</option>
+                  <option value="none">無期限（手動失効まで）</option>
+                </select>
+                <p className="text-xs text-gray-500 mt-1">
+                  期限切れ後は自動的に使えなくなります
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 mt-6">
+              <button
+                onClick={onClose}
+                disabled={issuing}
+                className="py-3 border-2 border-gray-300 rounded-lg font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                キャンセル
+              </button>
+              <button
+                onClick={handleIssue}
+                disabled={issuing}
+                className="btn-primary py-3 disabled:opacity-50"
+              >
+                {issuing ? '発行中...' : 'URL発行'}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+              <p className="text-sm font-semibold text-green-800 mb-2">
+                ✓ 発行完了
+              </p>
+              <p className="text-xs text-gray-700 mb-2">
+                以下のURLを受付スタッフに共有してください。
+                URLが分かれば誰でもこの式典に受付できるので取り扱いに注意。
+              </p>
+              <div className="bg-white border border-gray-300 rounded p-2 break-all text-xs font-mono text-accent-dark">
+                {issuedUrl}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                onClick={onClose}
+                className="py-3 border-2 border-gray-300 rounded-lg font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                閉じる
+              </button>
+              <button onClick={handleCopy} className="btn-primary py-3">
+                URLをコピー
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
