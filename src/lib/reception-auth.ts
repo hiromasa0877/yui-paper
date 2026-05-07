@@ -54,8 +54,17 @@ export async function authorizeReceptionRequest(
 ): Promise<AuthContext> {
   // ① 受付トークン認証
   const token = req.headers.get('x-reception-token');
+  // 診断ログ: 「実機で 401 が出るがサーバ側ロジックは正常」というケースを切り分けるために、
+  // 受け取ったヘッダの存在と長さ（中身は秘匿のため出さない）と targetCeremonyId を残す。
+  // 値そのものではなく「届いたか」が分かれば、原因がクライアント側か判別できる。
+  const hasAuthHeader = !!req.headers.get('authorization');
+  const tokenLen = typeof token === 'string' ? token.length : 0;
+  console.log(
+    `[auth] reception scan: hasToken=${!!token} tokenLen=${tokenLen} hasAuth=${hasAuthHeader} target=${targetCeremonyId}`
+  );
   if (typeof token === 'string' && token.length > 0) {
     if (!isValidTokenFormat(token)) {
+      console.warn(`[auth] token format rejected (len=${tokenLen})`);
       // 形式不正は早期に弾く（ブルートフォース対策）
       return NO_AUTH;
     }
@@ -67,6 +76,13 @@ export async function authorizeReceptionRequest(
         authorizedCeremonyId: resolved.ceremonyId,
         userId: null,
       };
+    }
+    if (resolved) {
+      console.warn(
+        `[auth] token resolved but ceremony mismatch: token→${resolved.ceremonyId} vs body→${targetCeremonyId}`
+      );
+    } else {
+      console.warn('[auth] token did not resolve (revoked/expired/missing)');
     }
     // トークンはあるが対象 ceremony と一致しない / 無効
     return NO_AUTH;

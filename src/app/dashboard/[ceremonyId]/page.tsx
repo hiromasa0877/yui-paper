@@ -40,6 +40,7 @@ export default function DashboardPage() {
     'all'
   );
   const [issueModalOpen, setIssueModalOpen] = useState(false);
+  const [staffModalOpen, setStaffModalOpen] = useState(false);
 
   useEffect(() => {
     fetchCeremony();
@@ -330,6 +331,13 @@ export default function DashboardPage() {
               >
                 📱 受付URL発行
               </button>
+              <button
+                type="button"
+                onClick={() => setStaffModalOpen(true)}
+                className="px-4 py-2 bg-slate-600 text-white text-sm font-semibold rounded-lg hover:opacity-90"
+              >
+                👥 スタッフ管理
+              </button>
             </div>
           </div>
         )}
@@ -490,6 +498,13 @@ export default function DashboardPage() {
           ceremonyId={ceremonyId}
           ceremonyName={ceremony?.name ?? '式典'}
           onClose={() => setIssueModalOpen(false)}
+        />
+      )}
+
+      {staffModalOpen && (
+        <StaffModal
+          ceremonyId={ceremonyId}
+          onClose={() => setStaffModalOpen(false)}
         />
       )}
     </div>
@@ -674,4 +689,278 @@ function IssueTokenModal({
       </div>
     </div>
   );
+}
+
+/**
+ * 式典スタッフ管理モーダル。
+ *
+ * オーナーが受付スタッフ・閲覧者を招待・除外する。
+ * 招待される側は事前に Supabase にサインアップしている必要がある（メールベースで照合）。
+ */
+type StaffMember = {
+  user_id: string;
+  email: string | null;
+  role: 'owner' | 'staff' | 'viewer';
+  added_at: string;
+};
+
+function StaffModal({
+  ceremonyId,
+  onClose,
+}: {
+  ceremonyId: string;
+  onClose: () => void;
+}) {
+  const [members, setMembers] = useState<StaffMember[]>([]);
+  const [myRole, setMyRole] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<'staff' | 'viewer'>('staff');
+  const [inviting, setInviting] = useState(false);
+
+  const getJwt = async (): Promise<string | null> => {
+    const { data } = await supabase.auth.getSession();
+    return data?.session?.access_token ?? null;
+  };
+
+  const fetchMembers = async () => {
+    setLoading(true);
+    try {
+      const jwt = await getJwt();
+      if (!jwt) {
+        toast.error('ログインが必要です');
+        return;
+      }
+      const res = await fetch(
+        `/api/ceremony/staff?ceremony_id=${encodeURIComponent(ceremonyId)}`,
+        { headers: { Authorization: `Bearer ${jwt}` } }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || `取得失敗 (HTTP ${res.status})`);
+      }
+      const json = await res.json();
+      setMembers(json.staff ?? []);
+      setMyRole(json.my_role ?? null);
+    } catch (e: any) {
+      toast.error(e?.message || 'スタッフ取得に失敗しました');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchMembers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleInvite = async () => {
+    const email = inviteEmail.trim().toLowerCase();
+    if (!email) {
+      toast.error('メールアドレスを入力してください');
+      return;
+    }
+    setInviting(true);
+    try {
+      const jwt = await getJwt();
+      if (!jwt) {
+        toast.error('ログインが必要です');
+        return;
+      }
+      const res = await fetch('/api/ceremony/staff', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${jwt}`,
+        },
+        body: JSON.stringify({
+          ceremony_id: ceremonyId,
+          email,
+          role: inviteRole,
+        }),
+      });
+      if (res.status === 404) {
+        toast.error(
+          'このメールでサインアップ済みのユーザーが見つかりません。先にサインアップしてもらってください。',
+          { duration: 7000 }
+        );
+        return;
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || `招待失敗 (HTTP ${res.status})`);
+      }
+      toast.success(`${email} を ${roleLabel(inviteRole)} として追加しました`);
+      setInviteEmail('');
+      await fetchMembers();
+    } catch (e: any) {
+      toast.error(e?.message || '招待に失敗しました');
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleRemove = async (member: StaffMember) => {
+    if (!confirm(`${member.email ?? member.user_id} をこの式典から外しますか？`)) {
+      return;
+    }
+    try {
+      const jwt = await getJwt();
+      if (!jwt) {
+        toast.error('ログインが必要です');
+        return;
+      }
+      const res = await fetch(
+        `/api/ceremony/staff?ceremony_id=${encodeURIComponent(ceremonyId)}&user_id=${encodeURIComponent(member.user_id)}`,
+        {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${jwt}` },
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error || `削除失敗 (HTTP ${res.status})`);
+      }
+      toast.success('メンバーを除外しました');
+      await fetchMembers();
+    } catch (e: any) {
+      toast.error(e?.message || '削除に失敗しました');
+    }
+  };
+
+  const isOwner = myRole === 'owner';
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6 max-h-[85vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-xl font-bold text-accent-dark mb-2">
+          スタッフ管理
+        </h2>
+        <p className="text-xs text-gray-600 mb-4 leading-relaxed">
+          この式典にアクセスできる人を管理します。
+          受付の手伝い人だけ追加すれば、その人は他の式典は見えません。
+        </p>
+
+        {/* 招待フォーム（owner のみ） */}
+        {isOwner && (
+          <div className="border border-gray-200 rounded-lg p-4 mb-5 bg-gray-50">
+            <p className="text-sm font-semibold text-accent-dark mb-2">
+              メンバーを追加
+            </p>
+            <p className="text-xs text-gray-500 mb-3">
+              ※ 追加する相手には、先に
+              <a
+                href="/auth/login"
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent-teal underline mx-1"
+              >
+                サインアップ
+              </a>
+              しておいてもらってください。
+            </p>
+            <div className="space-y-2">
+              <input
+                type="email"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                placeholder="example@example.com"
+                className="input-base"
+              />
+              <div className="flex gap-2">
+                <select
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value as any)}
+                  className="input-base flex-1"
+                >
+                  <option value="staff">スタッフ（金額も含めて見える）</option>
+                  <option value="viewer">閲覧のみ（金額は見えない）</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={handleInvite}
+                  disabled={inviting}
+                  className="btn-primary px-4 py-2 disabled:opacity-50 whitespace-nowrap"
+                >
+                  {inviting ? '追加中...' : '追加'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* 現在のメンバー */}
+        <p className="text-sm font-semibold text-accent-dark mb-2">
+          現在のメンバー
+        </p>
+        {loading ? (
+          <p className="text-sm text-gray-500">読み込み中...</p>
+        ) : members.length === 0 ? (
+          <p className="text-sm text-gray-500">メンバーがいません</p>
+        ) : (
+          <ul className="space-y-2">
+            {members.map((m) => (
+              <li
+                key={m.user_id}
+                className="flex items-center justify-between border border-gray-200 rounded-lg p-3"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-accent-dark truncate">
+                    {m.email ?? '(メール不明)'}
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    {roleLabel(m.role)} ・ 追加日{' '}
+                    {new Date(m.added_at).toLocaleDateString('ja-JP')}
+                  </p>
+                </div>
+                {isOwner && m.role !== 'owner' && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemove(m)}
+                    className="ml-3 px-3 py-1.5 text-xs font-semibold text-red-600 bg-red-50 hover:bg-red-100 border border-red-200 rounded"
+                  >
+                    削除
+                  </button>
+                )}
+                {m.role === 'owner' && (
+                  <span className="ml-3 text-xs text-gray-400">
+                    （オーナーは削除できません）
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="mt-6 flex justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="py-2 px-4 border-2 border-gray-300 rounded-lg font-semibold text-gray-700 hover:bg-gray-50"
+          >
+            閉じる
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function roleLabel(role: string): string {
+  switch (role) {
+    case 'owner':
+      return 'オーナー';
+    case 'staff':
+      return 'スタッフ';
+    case 'viewer':
+      return '閲覧のみ';
+    default:
+      return role;
+  }
 }

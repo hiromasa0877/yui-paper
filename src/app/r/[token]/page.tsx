@@ -103,6 +103,15 @@ export default function ReceptionTokenPage() {
     const file = selectedFileRef.current;
     if (!file || !resolved) return;
 
+    // 受付トークンが空なら絶対に投げない（意味のない 401 を踏まないため）。
+    // ここに来ているということは resolved が成立しているはずだが、念のためチェック。
+    if (!token || typeof token !== 'string' || token.length === 0) {
+      toast.error('受付URLが不完全です。URLを開き直してください。', {
+        duration: 5000,
+      });
+      return;
+    }
+
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       toast.error('電波がありません。電波が回復してから再撮影してください。', {
         duration: 5000,

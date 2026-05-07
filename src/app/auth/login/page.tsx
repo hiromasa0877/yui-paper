@@ -133,21 +133,12 @@ export default function LoginPage() {
                 : 'アカウントをお持ちでないですか？'}
             </p>
             <button
+              type="button"
               onClick={() => setIsSignUp(!isSignUp)}
               className="mt-2 text-accent-gold font-semibold hover:underline"
             >
               {isSignUp ? 'ログイン' : 'サインアップ'}
             </button>
-          </div>
-
-          {/* Info Box */}
-          <div className="mt-6 p-4 bg-accent-teal bg-opacity-10 border-l-4 border-accent-teal rounded-lg">
-            <p className="text-xs text-gray-600">
-              <strong>デモ用:</strong>
-              <br />
-              任意のメールアドレスとパスワードで
-              サインアップできます
-            </p>
           </div>
         </div>
       </div>
