@@ -109,9 +109,19 @@ export default function ReceptionPage() {
       form.append('image', compressed);
       form.append('client_ref', clientRef);
 
+      // 認証用に現在のSupabase JWTを取得。
+      // /api/reception/scan は X-Reception-Token か Authorization: Bearer のいずれかを
+      // 要求するため、ダッシュボード経由の受付画面ではログイン中ユーザーの JWT を載せる。
+      const { data: sessionData } = await supabase.auth.getSession();
+      const jwt = sessionData?.session?.access_token;
+      if (!jwt) {
+        throw new Error('ログインセッションが切れています。再ログインしてください。');
+      }
+
       // ③ scan: 番号採番＋画像保存だけの「高速パス」（〜1〜2秒）
       const res = await fetch('/api/reception/scan', {
         method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}` },
         body: form,
       });
       if (!res.ok) {
@@ -130,7 +140,10 @@ export default function ReceptionPage() {
         try {
           fetch('/api/reception/process-ocr', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${jwt}`,
+            },
             body: JSON.stringify({
               attendee_id: json.attendee_id,
               image_path: json.image_path,
