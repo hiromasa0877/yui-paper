@@ -88,6 +88,16 @@ export default function Home() {
         data: { user },
       } = await supabase.auth.getUser();
 
+      // 診断: PostgREST 側で auth.uid() が何を返すかを確認する。
+      // migration 013 で whoami() RPC を追加。クライアントの user.id と DB 側の auth.uid()
+      // が一致していなければ、JWT 伝搬のバグを示す。コンソールに出して原因切り分けに使う。
+      try {
+        const { data: who } = await supabase.rpc('whoami');
+        console.log('[diag whoami]', who, 'client.user.id=', user?.id);
+      } catch (e) {
+        console.warn('[diag whoami] failed', e);
+      }
+
       if (!user) {
         toast.error('ログインセッションが無効です。再ログインしてください。');
         router.push('/auth/login');
