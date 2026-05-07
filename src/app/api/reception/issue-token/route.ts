@@ -100,8 +100,32 @@ export async function POST(req: NextRequest) {
     .eq('ceremony_id', ceremonyId)
     .eq('user_id', userId)
     .maybeSingle();
+
   if (!staff || staff.role !== 'owner') {
-    return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+    // フォールバック: migration 009 の backfill 漏れ対策。
+    // ceremonies.mourner_user_id が呼び出し元と一致するなら、その場で
+    // ceremony_staff に owner レコードを作成して owner として扱う。
+    const { data: ceremony } = await admin
+      .from('ceremonies')
+      .select('mourner_user_id')
+      .eq('id', ceremonyId)
+      .maybeSingle();
+    if (ceremony && ceremony.mourner_user_id === userId) {
+      await admin
+        .from('ceremony_staff')
+        .upsert(
+          {
+            ceremony_id: ceremonyId,
+            user_id: userId,
+            role: 'owner',
+            added_by: userId,
+          },
+          { onConflict: 'ceremony_id,user_id' }
+        );
+      // 以降は owner として通す
+    } else {
+      return NextResponse.json({ error: 'forbidden' }, { status: 403 });
+    }
   }
 
   // 衝突回避のため最大3回までリトライ

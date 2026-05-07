@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 
 type HeaderProps = {
@@ -11,10 +12,28 @@ type HeaderProps = {
 
 export default function Header({ showLogo = true, backButton = false }: HeaderProps) {
   const router = useRouter();
+  const [email, setEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      if (!cancelled) setEmail(data.user?.email ?? null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
-    router.push('/');
+    // モーダル・クリップボード状態などローカル状態をクリーンに捨てるため
+    // router.push ではなくフルナビゲーションで login 画面へ遷移する。
+    if (typeof window !== 'undefined') {
+      window.location.href = '/auth/login';
+    } else {
+      router.push('/auth/login');
+    }
   };
 
   return (
@@ -42,8 +61,16 @@ export default function Header({ showLogo = true, backButton = false }: HeaderPr
             </Link>
           )}
         </div>
-        {/* 右ブロック: ログアウト。shrink-0 で絶対に縮まない・切れない。 */}
-        <nav className="flex items-center shrink-0">
+        {/* 右ブロック: ログイン中のメール + ログアウト。shrink-0 で絶対に縮まない・切れない。 */}
+        <nav className="flex items-center gap-2 sm:gap-3 shrink-0">
+          {email && (
+            <span
+              className="hidden sm:inline text-xs text-gray-300 max-w-[200px] truncate"
+              title={email}
+            >
+              {email}
+            </span>
+          )}
           <button
             type="button"
             onClick={handleLogout}

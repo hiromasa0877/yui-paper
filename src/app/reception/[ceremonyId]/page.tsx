@@ -112,18 +112,39 @@ export default function ReceptionPage() {
       // 認証用に現在のSupabase JWTを取得。
       // /api/reception/scan は X-Reception-Token か Authorization: Bearer のいずれかを
       // 要求するため、ダッシュボード経由の受付画面ではログイン中ユーザーの JWT を載せる。
-      const { data: sessionData } = await supabase.auth.getSession();
-      const jwt = sessionData?.session?.access_token;
+      const getJwt = async (): Promise<string | null> => {
+        const { data } = await supabase.auth.getSession();
+        return data?.session?.access_token ?? null;
+      };
+
+      let jwt = await getJwt();
       if (!jwt) {
         throw new Error('ログインセッションが切れています。再ログインしてください。');
       }
 
+      const doScan = async (token: string) =>
+        fetch('/api/reception/scan', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          body: form,
+        });
+
       // ③ scan: 番号採番＋画像保存だけの「高速パス」（〜1〜2秒）
-      const res = await fetch('/api/reception/scan', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${jwt}` },
-        body: form,
-      });
+      let res = await doScan(jwt);
+      // 長時間放置で JWT が期限切れになると 401 が返る。一度だけ refreshSession して再試行。
+      if (res.status === 401) {
+        await supabase.auth.refreshSession();
+        const newJwt = await getJwt();
+        if (newJwt) {
+          jwt = newJwt;
+          res = await doScan(jwt);
+        }
+        if (res.status === 401) {
+          throw new Error(
+            'ログインセッションが切れています。再ログインしてください。'
+          );
+        }
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err?.error || `スキャンに失敗しました (HTTP ${res.status})`);
@@ -324,6 +345,15 @@ function ResultView({
     if (initialStatus === 'failed') return;
 
     let cancelled = false;
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+
+    const stopPolling = () => {
+      if (intervalId !== null) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
     const tick = async () => {
       const { data } = await supabase
         .from('attendees')
@@ -331,25 +361,32 @@ function ResultView({
         .eq('id', attendee_id)
         .single();
       if (cancelled || !data) return;
-      setOcrStatus(data.ocr_status || 'pending');
+      const status = data.ocr_status || 'pending';
+      setOcrStatus(status);
       if (data.ocr_extracted_fields) {
         setExtracted(data.ocr_extracted_fields as any);
       }
+      // 終端状態（success / failed / review_needed）に到達したらポーリング停止。
+      // これがないと「次の方」を押すまで 2 秒おきに Supabase を叩き続けるバグがあった。
+      if (status === 'success' || status === 'failed' || status === 'review_needed') {
+        stopPolling();
+      }
     };
 
-    // 即時1回 + 2秒ポーリング（OCR完了は通常3-6秒）
+    // 即時1回 + 2秒ポーリング（OCR完了は通常3-6秒）。最大15秒で打ち切り。
     tick();
-    const id = setInterval(() => {
+    intervalId = setInterval(() => {
       if (cancelled) return;
-      tick().then(() => {
-        if (cancelled) return;
-        // 完了/失敗したらポーリング停止
-      });
+      tick();
     }, 2000);
+
+    // 安全弁: 30秒たっても終端状態に届かなければ強制停止（無限ループ防止）。
+    const timeoutId = setTimeout(stopPolling, 30000);
 
     return () => {
       cancelled = true;
-      clearInterval(id);
+      stopPolling();
+      clearTimeout(timeoutId);
     };
   }, [attendee_id, initialStatus]);
 

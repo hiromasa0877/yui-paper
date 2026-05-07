@@ -16,7 +16,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
+import Header from '@/components/Header';
 import { supabase } from '@/lib/supabase';
 import { Attendee, Ceremony } from '@/types/database';
 import { formatCurrency, formatKodenNumber } from '@/lib/utils';
@@ -26,6 +27,7 @@ const PRESETS = [5000, 10000];
 
 export default function AmountEntryPage() {
   const params = useParams();
+  const router = useRouter();
   const ceremonyId = params.ceremonyId as string;
 
   const [ceremony, setCeremony] = useState<Ceremony | null>(null);
@@ -35,12 +37,26 @@ export default function AmountEntryPage() {
   const [customAmount, setCustomAmount] = useState('');
   const [showCustom, setShowCustom] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
 
   const numberInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    fetchCeremony();
-    fetchPending();
+    // 認証ガード: 未ログインだと RLS で全クエリが空を返し、
+    // saveAmount まで silently 0 行更新で「保存しました」と誤表示される。
+    // 先にセッションを確認してから本処理に入る。
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        router.push('/auth/login');
+        return;
+      }
+      setAuthChecked(true);
+      await Promise.all([fetchCeremony(), fetchPending()]);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ceremonyId]);
 
   const fetchCeremony = async () => {
@@ -95,14 +111,22 @@ export default function AmountEntryPage() {
   const saveAmount = async (amount: number) => {
     if (!current) return;
     setSaving(true);
-    const { error } = await supabase
+    // 更新後の行を select() で必ず受け取り、0 行更新（権限不足）を検出する。
+    // RLS で更新権限が無いと error は出ずに 0 行が返るため、
+    // 「保存に失敗しました」の検出にこれが必要。
+    const { data, error } = await supabase
       .from('attendees')
       .update({ koden_amount: amount })
-      .eq('id', current.id);
+      .eq('id', current.id)
+      .select('id');
     setSaving(false);
     if (error) {
       console.error(error);
       toast.error('保存に失敗しました');
+      return;
+    }
+    if (!data || data.length === 0) {
+      toast.error('権限がないか、対象が見つかりません。再ログインしてください。');
       return;
     }
     toast.success(
@@ -126,8 +150,17 @@ export default function AmountEntryPage() {
     saveAmount(n);
   };
 
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen bg-accent-cream flex items-center justify-center">
+        <div className="text-gray-500">認証確認中...</div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-accent-cream">
+      <Header backButton={true} />
       <main className="max-w-2xl mx-auto px-4 py-6 sm:py-8">
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-accent-dark">

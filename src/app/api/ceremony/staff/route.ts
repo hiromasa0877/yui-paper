@@ -72,7 +72,31 @@ async function getMemberRole(
     .eq('ceremony_id', ceremonyId)
     .eq('user_id', userId)
     .maybeSingle();
-  return data?.role ?? null;
+  if (data?.role) return data.role;
+
+  // フォールバック: ceremony_staff バックフィル漏れ対策。
+  // ceremonies.mourner_user_id == userId なら owner として扱い、
+  // ついでに ceremony_staff に追加して以降のクエリを RLS が通るようにする。
+  const { data: ceremony } = await admin
+    .from('ceremonies')
+    .select('mourner_user_id')
+    .eq('id', ceremonyId)
+    .maybeSingle();
+  if (ceremony && ceremony.mourner_user_id === userId) {
+    await admin
+      .from('ceremony_staff')
+      .upsert(
+        {
+          ceremony_id: ceremonyId,
+          user_id: userId,
+          role: 'owner',
+          added_by: userId,
+        },
+        { onConflict: 'ceremony_id,user_id' }
+      );
+    return 'owner';
+  }
+  return null;
 }
 
 /**

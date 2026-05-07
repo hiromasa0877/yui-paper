@@ -21,17 +21,24 @@ export default function Home() {
   });
 
   useEffect(() => {
-    fetchCeremonies();
-    checkAuth();
+    // 認証確認 → 式典読み込みの順序で実行する。
+    // 並列で叩くと auth.getUser() がセッション復元中に null を返し、
+    // 一瞬「式典がまだありません」が表示されるため。
+    (async () => {
+      const ok = await checkAuth();
+      if (ok) await fetchCeremonies();
+    })();
   }, []);
 
-  const checkAuth = async () => {
+  const checkAuth = async (): Promise<boolean> => {
     const {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) {
       router.push('/auth/login');
+      return false;
     }
+    return true;
   };
 
   const fetchCeremonies = async () => {
@@ -99,8 +106,9 @@ export default function Home() {
 
       toast.success('式典を作成しました');
       setFormData({ name: '', deceased_name: '', venue: '', ceremony_date: '' });
-      // 作成後は受付画面へ遷移（紙スキャン運用の起点）
-      router.push(`/reception/${data.id}`);
+      // 作成後はダッシュボードへ遷移。受付/金額/レビュー/URL発行/スタッフ管理の
+      // 全機能の入口を見せる。受付撮影に直接行くのは導線として狭すぎる。
+      router.push(`/dashboard/${data.id}`);
     } catch (error) {
       console.error('Error creating ceremony:', error);
       toast.error('式典の作成に失敗しました');

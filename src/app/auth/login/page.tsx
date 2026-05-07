@@ -49,12 +49,23 @@ export default function LoginPage() {
       }
     } catch (error: any) {
       console.error('Auth error:', error);
-      if (error.message.includes('Invalid login credentials')) {
+      const msg: string = error?.message ?? '';
+      // Supabase の代表的なエラー文言を日本語に翻訳。
+      // 不明なケースは汎用メッセージにフォールバック（生の英語エラーをユーザーに見せない）。
+      if (msg.includes('Invalid login credentials')) {
         toast.error('メールアドレスまたはパスワードが正しくありません');
-      } else if (error.message.includes('User already registered')) {
+      } else if (msg.includes('User already registered')) {
         toast.error('このメールアドレスは既に登録されています');
+      } else if (msg.includes('Email not confirmed')) {
+        toast.error('メール確認がまだ完了していません。受信箱をご確認ください。');
+      } else if (msg.includes('Email rate limit') || msg.includes('rate limit')) {
+        toast.error('しばらく時間を置いてから再度お試しください');
+      } else if (msg.includes('Password should be at least')) {
+        toast.error('パスワードは6文字以上で設定してください');
+      } else if (msg.toLowerCase().includes('network')) {
+        toast.error('通信エラーが発生しました。電波状況をご確認ください');
       } else {
-        toast.error(error.message || 'エラーが発生しました');
+        toast.error('ログインに失敗しました。もう一度お試しください');
       }
     } finally {
       setLoading(false);

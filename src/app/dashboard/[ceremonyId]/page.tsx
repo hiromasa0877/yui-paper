@@ -61,15 +61,25 @@ export default function DashboardPage() {
           if (payload.eventType === 'INSERT') {
             const n = payload.new as Attendee & { deleted_at?: string | null };
             if (n.deleted_at) return; // 論理削除済みは無視
-            setAttendees((prev) => [n, ...prev]);
+            // 重複防止: もし既にリストにあれば置換、無ければ先頭に追加
+            setAttendees((prev) =>
+              prev.some((a) => a.id === n.id)
+                ? prev.map((a) => (a.id === n.id ? n : a))
+                : [n, ...prev]
+            );
           } else if (payload.eventType === 'UPDATE') {
             const n = payload.new as Attendee & { deleted_at?: string | null };
             if (n.deleted_at) {
               // 論理削除 → 一覧から除外
               setAttendees((prev) => prev.filter((a) => a.id !== n.id));
             } else {
+              // unknown id（INSERT イベントを取り逃したケース）は INSERT 扱いで取り込む。
+              // /r/<token> 経由の受付で INSERT 通知が遅延すると UPDATE が先に来て取りこぼし、
+              // 「(受付中)」のまま固まる現象を防ぐ。
               setAttendees((prev) =>
-                prev.map((a) => (a.id === n.id ? n : a))
+                prev.some((a) => a.id === n.id)
+                  ? prev.map((a) => (a.id === n.id ? n : a))
+                  : [n, ...prev]
               );
             }
           } else if (payload.eventType === 'DELETE') {
@@ -79,8 +89,16 @@ export default function DashboardPage() {
       )
       .subscribe();
 
+    // リアルタイムを取りこぼした時の保険として 15 秒ごとに refetch。
+    // realtime publication / RLS との相性で稀に INSERT 通知が届かないケースがあるが、
+    // この保険があれば最大 15 秒で同期が取れる（実演的にはほぼ気付かれない）。
+    const safetyRefetch = setInterval(() => {
+      fetchAttendees();
+    }, 15000);
+
     return () => {
       supabase.removeChannel(channel);
+      clearInterval(safetyRefetch);
     };
   }, [ceremonyId]);
 
@@ -300,22 +318,22 @@ export default function DashboardPage() {
             <p className="text-gray-600">
               故人: {ceremony.deceased_name} | 会場: {ceremony.venue}
             </p>
-            <div className="flex gap-3 mt-3">
+            <div className="flex flex-wrap gap-2 sm:gap-3 mt-3">
               <Link
                 href={`/reception/${ceremonyId}`}
-                className="px-4 py-2 bg-accent-gold text-white text-sm font-semibold rounded-lg hover:opacity-90"
+                className="px-3 sm:px-4 py-2 bg-accent-gold text-white text-xs sm:text-sm font-semibold rounded-lg hover:opacity-90 whitespace-nowrap"
               >
                 📷 受付画面
               </Link>
               <Link
                 href={`/amount/${ceremonyId}`}
-                className="px-4 py-2 bg-accent-teal text-white text-sm font-semibold rounded-lg hover:opacity-90"
+                className="px-3 sm:px-4 py-2 bg-accent-teal text-white text-xs sm:text-sm font-semibold rounded-lg hover:opacity-90 whitespace-nowrap"
               >
                 💰 金額入力
               </Link>
               <Link
                 href={`/review/${ceremonyId}`}
-                className="px-4 py-2 bg-yellow-500 text-white text-sm font-semibold rounded-lg hover:opacity-90"
+                className="px-3 sm:px-4 py-2 bg-yellow-500 text-white text-xs sm:text-sm font-semibold rounded-lg hover:opacity-90 whitespace-nowrap"
               >
                 ⚠ 要確認レビュー
                 {stats.ocrReviewNeeded > 0 && (
@@ -327,14 +345,14 @@ export default function DashboardPage() {
               <button
                 type="button"
                 onClick={() => setIssueModalOpen(true)}
-                className="px-4 py-2 bg-purple-600 text-white text-sm font-semibold rounded-lg hover:opacity-90"
+                className="px-3 sm:px-4 py-2 bg-purple-600 text-white text-xs sm:text-sm font-semibold rounded-lg hover:opacity-90 whitespace-nowrap"
               >
                 📱 受付URL発行
               </button>
               <button
                 type="button"
                 onClick={() => setStaffModalOpen(true)}
-                className="px-4 py-2 bg-slate-600 text-white text-sm font-semibold rounded-lg hover:opacity-90"
+                className="px-3 sm:px-4 py-2 bg-slate-600 text-white text-xs sm:text-sm font-semibold rounded-lg hover:opacity-90 whitespace-nowrap"
               >
                 👥 スタッフ管理
               </button>

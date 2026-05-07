@@ -140,6 +140,23 @@ export default function ReceptionTokenPage() {
         body: form,
       });
       if (!res.ok) {
+        // 401 = トークン失効/期限切れの可能性 → 再検証してエラー画面に切り替え
+        if (res.status === 401) {
+          try {
+            const reCheck = await fetch(
+              `/api/reception/resolve-token?token=${encodeURIComponent(token)}`
+            );
+            if (reCheck.status === 404) {
+              setResolveError(
+                'この受付URLが失効しました。葬儀社の担当者に新しいURLを発行してもらってください。'
+              );
+              setViewState('error');
+              return;
+            }
+          } catch {
+            // ネットワークエラーはトーストに任せる
+          }
+        }
         const err = await res.json().catch(() => ({}));
         throw new Error(err?.error || `スキャンに失敗しました (HTTP ${res.status})`);
       }
@@ -187,6 +204,11 @@ export default function ReceptionTokenPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-accent-cream to-white">
+      {/* 軽量ロゴヘッダー: 受付モードの公開ページなのでログアウト等は出さないが、
+          ブランド表示が無いとフィッシングサイトに見えるため最小限のロゴだけ置く。 */}
+      <div className="bg-accent-dark text-center py-2">
+        <span className="text-sm font-bold text-accent-gold">結（ゆい）レセプション</span>
+      </div>
       <main className="max-w-2xl mx-auto px-4 py-6 sm:py-8">
         {viewState === 'loading' && (
           <div className="card text-center py-16">
