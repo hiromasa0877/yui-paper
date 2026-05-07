@@ -120,7 +120,10 @@ export default function ReviewPage() {
       return;
     }
     setSaving(true);
-    const { error } = await supabase
+    // .select('id') で更新後の行数を確認できるようにする。
+    // RLS で UPDATE が 0 行に弾かれても error が出ないため、これがないと
+    // 「保存しました」と表示しつつ実際は何も更新されていないバグになる。
+    const { data, error } = await supabase
       .from('attendees')
       .update({
         full_name: formName.trim(),
@@ -131,12 +134,17 @@ export default function ReviewPage() {
         furigana: formFurigana.trim() || null,
         ocr_status: 'success',
       })
-      .eq('id', current.id);
+      .eq('id', current.id)
+      .select('id');
     setSaving(false);
 
     if (error) {
       console.error(error);
       toast.error('保存に失敗しました');
+      return;
+    }
+    if (!data || data.length === 0) {
+      toast.error('権限が無いか、対象が見つかりません。再ログインしてください。');
       return;
     }
     toast.success(`#${formatKodenNumber(current.koden_number)} を確定しました`);

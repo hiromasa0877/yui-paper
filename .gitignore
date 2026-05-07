@@ -51,3 +51,8 @@ node-v*-darwin-*/
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Generated proposal artifacts (workspace-only, not part of source)
+slide-*.jpg
+*.pdf
+*.pptx

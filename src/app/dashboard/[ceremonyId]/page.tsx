@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Header from '@/components/Header';
 import AttendeeTable from '@/components/AttendeeTable';
@@ -30,6 +30,7 @@ const isReceived = (a: Attendee) => a.koden_number != null;
 
 export default function DashboardPage() {
   const params = useParams();
+  const router = useRouter();
   const ceremonyId = params.ceremonyId as string;
 
   const [ceremony, setCeremony] = useState<Ceremony | null>(null);
@@ -41,8 +42,26 @@ export default function DashboardPage() {
   );
   const [issueModalOpen, setIssueModalOpen] = useState(false);
   const [staffModalOpen, setStaffModalOpen] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // 認証ガード: 未ログインのまま realtime / safetyRefetch が無限に走るのを防ぐ。
+  // セッション無し → /auth/login にリダイレクト。これがないと RLS が空配列を返し続けて
+  // ユーザーには空のダッシュボードが表示され、原因不明な状態になる。
+  useEffect(() => {
+    (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        router.push('/auth/login');
+        return;
+      }
+      setAuthChecked(true);
+    })();
+  }, [router]);
 
   useEffect(() => {
+    if (!authChecked) return;
     fetchCeremony();
     fetchAttendees();
 
@@ -100,7 +119,7 @@ export default function DashboardPage() {
       supabase.removeChannel(channel);
       clearInterval(safetyRefetch);
     };
-  }, [ceremonyId]);
+  }, [ceremonyId, authChecked]);
 
   const fetchCeremony = async () => {
     try {
