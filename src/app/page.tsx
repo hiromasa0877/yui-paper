@@ -79,12 +79,18 @@ export default function Home() {
 
     try {
       setIsCreating(true);
+
+      // 認証セッションが古いキャッシュのままだと PostgREST が auth.uid() を NULL とみなし、
+      // ceremonies の RLS WITH CHECK (auth.uid() = mourner_user_id) が落ちて 42501 が返る。
+      // INSERT 直前に refresh して、取得した user.id と JWT を確実に同期させる。
+      await supabase.auth.refreshSession();
       const {
         data: { user },
       } = await supabase.auth.getUser();
 
       if (!user) {
-        toast.error('ユーザーが見つかりません');
+        toast.error('ログインセッションが無効です。再ログインしてください。');
+        router.push('/auth/login');
         return;
       }
 
@@ -102,16 +108,28 @@ export default function Home() {
         .select()
         .single();
 
-      if (error) throw error;
+      if (error) {
+        console.error('Ceremony INSERT error:', error);
+        // 実エラーをトーストに出してデバッグしやすくする。
+        // 一般ユーザー向けにも「何が起きたか」が分かれば再現性が下がる。
+        const detail = error.message || error.code || '不明なエラー';
+        if (error.code === '42501' || /row-level security/i.test(detail)) {
+          toast.error('権限エラーで作成できませんでした。一度ログアウトして再ログインしてください。', { duration: 8000 });
+        } else {
+          toast.error(`式典の作成に失敗しました: ${detail}`, { duration: 8000 });
+        }
+        return;
+      }
 
       toast.success('式典を作成しました');
       setFormData({ name: '', deceased_name: '', venue: '', ceremony_date: '' });
       // 作成後はダッシュボードへ遷移。受付/金額/レビュー/URL発行/スタッフ管理の
       // 全機能の入口を見せる。受付撮影に直接行くのは導線として狭すぎる。
       router.push(`/dashboard/${data.id}`);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error creating ceremony:', error);
-      toast.error('式典の作成に失敗しました');
+      const detail = error?.message || error?.code || '不明なエラー';
+      toast.error(`式典の作成に失敗しました: ${detail}`, { duration: 8000 });
     } finally {
       setIsCreating(false);
     }
